@@ -3,32 +3,27 @@
  *
  * Handles left-button (add) and right-button (erase) drawing on the map.
  *
- * ── Draw gesture lifecycle ──────────────────────────────────────────────────
+ * ── Changes from previous version ────────────────────────────────────────────
  *
- *  mousedown  → determine target object and mode; clear trail canvas; mark
- *               a pre-draw undo snapshot (stored temporarily, not pushed yet)
+ *  • All disks are a uniform DISK_RADIUS_MAX_PX — no grow/taper profile.
+ *    The triangle/tentacle profile emerges naturally: the base of a stroke
+ *    has been expanding longer than its tip, so it ends up wider.
  *
- *  mousemove  → emit disks along the cursor path onto the trail canvas
- *               (RasterOps.drawDisk) and into _diskTrail[] for the overlay
+ *  • Expansion starts immediately on mousedown via Expansion.startLive().
+ *    Each emitted disk is passed to Expansion.addSeeds() in real time.
+ *    On mouseup, Expansion.finishLive() switches to the decay phase.
  *
- *  mouseup    → push the pre-draw snapshot onto undoStack; hand the filled
- *               trail canvas to _finalizeTrail() which traces it, applies the
- *               boolean op, and updates UserObjects.
- *               (In Part 5 this is replaced by Expansion.start().)
+ *  • Space-held mode: expansion is skipped; the raw trail is committed
+ *    immediately on mouseup (same as before).
  *
- * ── Disk size profile (time-driven) ─────────────────────────────────────────
+ *  • DrawTool.drawOverlay() is a no-op in live expansion mode —
+ *    Expansion.drawOverlay() renders everything.  The trail overlay is still
+ *    shown in space-held mode for visual feedback.
  *
- *   t ∈ [0, GROW]:           r = lerp(MIN, MAX, t / GROW)
- *   t ∈ [GROW, GROW+TAPER]:  r = lerp(MAX, MIN, (t-GROW) / TAPER)
- *   t > GROW+TAPER:          r = MIN   (stays small)
- *
- *   All radii are in SCREEN pixels (constant visible size regardless of zoom).
- *
- * ── Coordinate note ──────────────────────────────────────────────────────────
- *
- *   Trail canvas & disk positions are in SCREEN pixels.
- *   Hit-testing passes WORLD coords to isPointInPath (see userObjects.js).
- *   Finalisation converts traced screen polygons → world via viewport.
+ * ── Coordinate note ────────────────────────────────────────────────────────
+ *  Trail canvas & disk positions: screen pixels.
+ *  Hit-testing passes WORLD coords to isPointInPath (see userObjects.js).
+ *  Expansion.addSeeds() receives screen coords directly.
  */
 
 (function (MapEditor) {
@@ -38,28 +33,26 @@
 
   // ── State ─────────────────────────────────────────────────────────────────
 
-  let _drawing         = false;
-  let _mode            = 'add';      // 'add' | 'erase'
-  let _targetObjId     = null;       // id of the UserObject being modified
-  let _targetIsNew     = false;      // true when we created a new object for this gesture
-  let _startTime       = 0;         // Date.now() at mousedown (for disk profile)
-  let _lastDiskX       = 0;         // screen coords of last emitted disk
-  let _lastDiskY       = 0;
-  let _hasPrevDisk     = false;
-  let _diskTrail       = [];         // [{sx, sy, r}] for drawOverlay
-  let _preDrawSnapshot = null;       // snapshot taken at mousedown, pushed on mouseup
+  let _drawing          = false;
+  let _mode             = 'add';
+  let _targetObjId      = null;
+  let _targetIsNew      = false;
+  let _usingLiveExpansion = false;   // false in space-held mode
 
-  // ── Initialisation ────────────────────────────────────────────────────────
+  let _lastDiskX        = 0;
+  let _lastDiskY        = 0;
+  let _hasPrevDisk      = false;
+  let _diskTrail        = [];        // [{sx,sy,r}] for space-held overlay
+  let _preDrawSnapshot  = null;      // for Expansion.cancel() recovery
+
+  // ── Init ──────────────────────────────────────────────────────────────────
 
   DrawTool.init = function () {
     const canvas = MapEditor.canvas;
-
     canvas.addEventListener('mousedown',  _onMouseDown);
     window.addEventListener('mousemove',  _onMouseMove);
     window.addEventListener('mouseup',    _onMouseUp);
-
-    // Prevent the context menu on right-click over the canvas.
-    canvas.addEventListener('dblclick', _onDoubleClick);
+    canvas.addEventListener('dblclick',   _onDoubleClick);
   };
 
   // ── Public interface ──────────────────────────────────────────────────────
@@ -67,57 +60,49 @@
   DrawTool.isDrawing = () => _drawing;
 
   /**
-   * Composite the live draw trail over the main canvas.
-   * Called by renderer.js on every frame while drawing.
-   * Uses screen-space coordinates — no viewport transform needed.
-   *
-   * @param {CanvasRenderingContext2D} ctx
+   * Draw overlay for space-held mode only.
+   * In live expansion mode Expansion.drawOverlay() handles visuals.
    */
   DrawTool.drawOverlay = function (ctx) {
-    if (!_drawing || _diskTrail.length === 0) return;
+    if (!_drawing || _usingLiveExpansion || _diskTrail.length === 0) return;
 
     ctx.save();
     ctx.globalAlpha = 0.75;
-
+    const obj = MapEditor.UserObjects.getById(_targetObjId);
     if (_mode === 'add') {
-      // Fill disks in the target object's colour.
-      const obj   = MapEditor.UserObjects.getById(_targetObjId);
       ctx.fillStyle = obj ? obj.color : '#ffffff';
-      for (const { sx, sy, r } of _diskTrail) {
-        ctx.beginPath();
-        ctx.arc(sx, sy, r, 0, Math.PI * 2);
-        ctx.fill();
-      }
     } else {
-      // Erase: show semi-transparent red disks.
-      ctx.fillStyle = 'rgba(220, 50, 50, 0.9)';
-      for (const { sx, sy, r } of _diskTrail) {
-        ctx.beginPath();
-        ctx.arc(sx, sy, r * 0.85, 0, Math.PI * 2);
-        ctx.fill();
-      }
+      ctx.fillStyle = 'rgba(220,50,50,0.9)';
     }
-
+    for (const { sx, sy, r } of _diskTrail) {
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.restore();
+  };
+
+  // ── Shared apply function (called by Expansion._finalize) ─────────────────
+
+  DrawTool.applyPolygonsToTarget = function (worldPolys, objId, mode, targetIsNew) {
+    _applyPolygonsToTarget(worldPolys, objId, mode, targetIsNew);
   };
 
   // ── Mouse event handlers ──────────────────────────────────────────────────
 
   function _onMouseDown(e) {
-    // Only left (0) or right (2) button.
     if (e.button !== 0 && e.button !== 2) return;
 
-    // If expansion is running from a previous gesture, finalize it first
-    // so the new draw starts from a clean committed state.
+    // Finalize any running expansion before starting a new gesture.
     if (MapEditor.Expansion && MapEditor.Expansion.isActive()) {
       MapEditor.Expansion.stop();
     }
 
-    const { viewport } = MapEditor;
-    const rect = MapEditor.canvas.getBoundingClientRect();
-    const sx   = e.clientX - rect.left;
-    const sy   = e.clientY - rect.top;
-    const wp   = viewport.screenToWorld(sx, sy);
+    const viewport = MapEditor.viewport;
+    const rect     = MapEditor.canvas.getBoundingClientRect();
+    const sx       = e.clientX - rect.left;
+    const sy       = e.clientY - rect.top;
+    const wp       = viewport.screenToWorld(sx, sy);
 
     // ── Ctrl+click: move shape to last-edited object ──────────────────────
     if (e.ctrlKey || e.metaKey) {
@@ -127,79 +112,72 @@
         if (lastEdited && lastEdited.id !== hit.object.id) {
           _pushUndo();
           MapEditor.UserObjects.moveShapeTo(hit.shape.id, lastEdited.id);
+          MapEditor.UserObjects.setLastEdited(lastEdited.id);
         }
       }
       return;
     }
 
-    // ── Normal draw / erase ───────────────────────────────────────────────
+    // ── Determine target object and mode ─────────────────────────────────
     const isErase = (e.button === 2);
     const hit     = MapEditor.UserObjects.hitTest(wp.x, wp.y);
 
     if (isErase) {
-      if (!hit) return;  // erase does nothing on empty space
+      if (!hit) return;
       _mode        = 'erase';
       _targetObjId = hit.object.id;
       _targetIsNew = false;
     } else {
       _mode = 'add';
       if (hit) {
-        // Drawing on an existing object → add to it.
         _targetObjId = hit.object.id;
         _targetIsNew = false;
         MapEditor.UserObjects.setLastEdited(_targetObjId);
       } else if (e.shiftKey) {
-        // Shift+draw on empty space → add new disconnected shape to last-edited.
         const lastEdited = MapEditor.UserObjects.getLastEdited();
         if (lastEdited) {
           _targetObjId = lastEdited.id;
           _targetIsNew = false;
         } else {
-          // No last-edited → create new object as fallback.
           const obj    = MapEditor.UserObjects.create();
           _targetObjId = obj.id;
           _targetIsNew = true;
         }
       } else {
-        // Draw on empty space → create a new object.
         const obj    = MapEditor.UserObjects.create();
         _targetObjId = obj.id;
         _targetIsNew = true;
       }
     }
 
-    // ── Begin gesture ─────────────────────────────────────────────────────
-    // Snapshot the state RIGHT BEFORE this gesture for Expansion.cancel() recovery.
-    // NOT pushed to undoStack here — undoStack.push() happens in Expansion._finalize().
+    // ── Take pre-draw snapshot (for Expansion.cancel()) ───────────────────
     _preDrawSnapshot = MapEditor.UserObjects.snapshot();
     if (_targetIsNew) {
-      // The newly-created (empty) object is not yet part of the meaningful state;
-      // strip it from the cancel-recovery snapshot.
       _preDrawSnapshot.userObjects = _preDrawSnapshot.userObjects.filter(
         o => o.id !== _targetObjId
       );
     }
 
+    // ── Begin gesture ──────────────────────────────────────────────────────
     MapEditor.RasterOps.clearTrail();
     _diskTrail    = [];
-    _startTime    = Date.now();
     _hasPrevDisk  = false;
     _drawing      = true;
 
-    e.preventDefault();
+    _usingLiveExpansion = !MapEditor.spaceHeld;
 
-    // Emit the first disk at the click position.
-    _maybeEmitDisks(sx, sy);
+    if (_usingLiveExpansion) {
+      MapEditor.Expansion.startLive(_targetObjId, _mode, _targetIsNew, _preDrawSnapshot);
+    }
+
+    e.preventDefault();
+    _emitDisk(sx, sy);
   }
 
   function _onMouseMove(e) {
     if (!_drawing) return;
-
     const rect = MapEditor.canvas.getBoundingClientRect();
-    const sx   = e.clientX - rect.left;
-    const sy   = e.clientY - rect.top;
-
-    _maybeEmitDisks(sx, sy);
+    _maybeEmitDisks(e.clientX - rect.left, e.clientY - rect.top);
   }
 
   function _onMouseUp(e) {
@@ -208,52 +186,40 @@
 
     _drawing = false;
 
-    const hasTrail = _diskTrail.length > 0;
-    if (!hasTrail) {
+    if (_diskTrail.length === 0) {
+      // No disks emitted — clean up.
       if (_targetIsNew) MapEditor.UserObjects.remove(_targetObjId);
+      if (_usingLiveExpansion && MapEditor.Expansion.isActive()) {
+        MapEditor.Expansion.cancel();
+      }
       _reset();
       return;
     }
 
-    // Extract disk centers (screen coords) for sea-clipping in expansion.
-    const diskCenters = _diskTrail.map(d => ({ sx: d.sx, sy: d.sy }));
-
-    // Capture pre-draw snapshot reference before _reset() clears it.
-    const preSnap = _preDrawSnapshot;
-
-    if (MapEditor.spaceHeld) {
-      // Space held → commit raw trail, no expansion.
-      // Push undo here since we bypass Expansion._finalize().
+    if (_usingLiveExpansion) {
+      _reset();
+      // Switch expansion from constant-speed to decay phase.
+      MapEditor.Expansion.finishLive();
+    } else {
+      // Space-held: commit raw trail immediately.
       _finalizeTrail();
       _reset();
-    } else {
-      const objId  = _targetObjId;
-      const mode   = _mode;
-      const isNew  = _targetIsNew;
-      _reset();
-      // Expansion._finalize() will push to undoStack after applying polygons.
-      MapEditor.Expansion.start(objId, mode, isNew, diskCenters, preSnap);
     }
   }
 
   function _onDoubleClick(e) {
-    // Handled by UI module (Part 6).
-    // Prevent the double-click from starting a draw gesture.
+    // Handled by titleRenderer; prevent accidental draw.
     e.preventDefault();
   }
 
   // ── Disk emission ─────────────────────────────────────────────────────────
 
-  /**
-   * Advance along the cursor path, emitting disks at the configured density.
-   * The radius is determined by the time-driven profile.
-   */
   function _maybeEmitDisks(sx, sy) {
-    const r       = _diskRadius();
+    const r       = MapEditor.Config.DISK_RADIUS_MAX_PX;
     const spacing = MapEditor.Config.TRAIL_DENSITY_PX * r;
 
     if (!_hasPrevDisk) {
-      _emitDisk(sx, sy, r);
+      _emitDisk(sx, sy);
       _lastDiskX   = sx;
       _lastDiskY   = sy;
       _hasPrevDisk = true;
@@ -263,63 +229,42 @@
     const dx   = sx - _lastDiskX;
     const dy   = sy - _lastDiskY;
     const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < spacing) return;
 
-    if (dist < spacing) return;  // haven't moved far enough yet
-
-    // Interpolate disks at equal spacing along the segment.
     const steps = Math.floor(dist / spacing);
     for (let i = 1; i <= steps; i++) {
       const t  = (i * spacing) / dist;
-      const ix = _lastDiskX + dx * t;
-      const iy = _lastDiskY + dy * t;
-      _emitDisk(ix, iy, r);
+      _emitDisk(_lastDiskX + dx * t, _lastDiskY + dy * t);
     }
-
-    // Advance last-disk position to the last emitted disk (not the current cursor).
-    const t      = (steps * spacing) / dist;
-    _lastDiskX   = _lastDiskX + dx * t;
-    _lastDiskY   = _lastDiskY + dy * t;
+    const t    = (steps * spacing) / dist;
+    _lastDiskX = _lastDiskX + dx * t;
+    _lastDiskY = _lastDiskY + dy * t;
   }
 
-  function _emitDisk(sx, sy, r) {
+  function _emitDisk(sx, sy) {
+    const r = MapEditor.Config.DISK_RADIUS_MAX_PX;
+
+    // Write to trail canvas (used by space-held path and tracing fallback).
     MapEditor.RasterOps.drawDisk(sx, sy, r);
     _diskTrail.push({ sx, sy, r });
-  }
 
-  /**
-   * Time-driven disk radius profile.
-   *
-   *  Phase 1 (grow):  r = MIN + (MAX−MIN) × t / GROW_TIME
-   *  Phase 2 (taper): r = MAX − (MAX−MIN) × (t−GROW) / TAPER_TIME
-   *  After both:      r = MIN
-   *
-   * @returns {number} radius in screen pixels
-   */
-  function _diskRadius() {
-    const { DISK_RADIUS_MIN_PX, DISK_RADIUS_MAX_PX,
-            PROFILE_GROW_TIME_S, PROFILE_TAPER_TIME_S } = MapEditor.Config;
-
-    const t = (Date.now() - _startTime) / 1000;  // seconds
-
-    if (t < PROFILE_GROW_TIME_S) {
-      return DISK_RADIUS_MIN_PX +
-        (DISK_RADIUS_MAX_PX - DISK_RADIUS_MIN_PX) * (t / PROFILE_GROW_TIME_S);
+    if (!_hasPrevDisk) {
+      _lastDiskX   = sx;
+      _lastDiskY   = sy;
+      _hasPrevDisk = true;
     }
 
-    const t2 = t - PROFILE_GROW_TIME_S;
-    if (t2 < PROFILE_TAPER_TIME_S) {
-      return DISK_RADIUS_MAX_PX -
-        (DISK_RADIUS_MAX_PX - DISK_RADIUS_MIN_PX) * (t2 / PROFILE_TAPER_TIME_S);
+    // In live expansion mode, send disk directly to expansion engine.
+    if (_usingLiveExpansion) {
+      MapEditor.Expansion.addSeeds(sx, sy, r);
     }
-
-    return DISK_RADIUS_MIN_PX;
   }
 
-  // ── Trail finalisation ────────────────────────────────────────────────────
+  // ── Space-held finalization ───────────────────────────────────────────────
 
   /**
-   * Trace the trail canvas and apply immediately (Space-held: no expansion).
-   * Pushes undo AFTER applying, consistent with Expansion._finalize().
+   * Commit the raw trail immediately (Space-held mode).
+   * Pushes to undo AFTER applying (mirrors Expansion._finalize behaviour).
    */
   function _finalizeTrail() {
     const worldPolys = MapEditor.Tracing.traceCanvas(
@@ -330,26 +275,11 @@
     } else {
       _applyPolygonsToTarget(worldPolys, _targetObjId, _mode, _targetIsNew);
     }
-    // Push undo after applying (mirrors Expansion._finalize behaviour).
     MapEditor.undoStack.push(MapEditor.UserObjects.snapshot());
-    if (MapEditor.UI && MapEditor.UI.refreshUndoButtons) {
-      MapEditor.UI.refreshUndoButtons();
-    }
+    if (MapEditor.UI && MapEditor.UI.refreshUndoButtons) MapEditor.UI.refreshUndoButtons();
   }
 
-  /**
-   * Apply a set of world-space polygons to the target object.
-   * Exported so the expansion engine (Part 5) can call it with the final
-   * expanded polygon set.
-   *
-   * @param {Array<Array<{x,y}>>} worldPolys
-   * @param {string}              objId
-   * @param {'add'|'erase'}       mode
-   * @param {boolean}             targetIsNew  — true if the object was just created
-   */
-  DrawTool.applyPolygonsToTarget = function (worldPolys, objId, mode, targetIsNew) {
-    _applyPolygonsToTarget(worldPolys, objId, mode, targetIsNew);
-  };
+  // ── Apply polygons ────────────────────────────────────────────────────────
 
   function _applyPolygonsToTarget(worldPolys, objId, mode, isNew) {
     const obj = MapEditor.UserObjects.getById(objId);
@@ -360,8 +290,8 @@
         const shape = MapEditor.PathOps.buildShapeFromWorldPolys(worldPolys);
         MapEditor.UserObjects.setShapes(objId, [shape]);
       } else {
-        const mergedShape = _mergeAllShapesWithPolys(obj, worldPolys);
-        MapEditor.UserObjects.setShapes(objId, [mergedShape]);
+        const merged = _mergeAllShapesWithPolys(obj, worldPolys);
+        MapEditor.UserObjects.setShapes(objId, [merged]);
       }
       _subtractFromNeighbours(worldPolys, objId);
     } else {
@@ -370,35 +300,22 @@
         .filter(Boolean);
       MapEditor.UserObjects.setShapes(objId, newShapes);
     }
-
-    // Always finish with the drawn-on object as last-edited, regardless of
-    // what _subtractFromNeighbours or setShapes may have changed it to.
     MapEditor.UserObjects.setLastEdited(objId);
   }
 
   function _mergeAllShapesWithPolys(obj, worldPolys) {
     let result = obj.shapes[0];
     for (let i = 1; i < obj.shapes.length; i++) {
-      result = MapEditor.PathOps.unionIntoShape(result, _shapeToWorldPolys(obj.shapes[i]));
+      result = MapEditor.PathOps.unionIntoShape(
+        result, MapEditor.PathOps.clipperToWorld(obj.shapes[i].clipperPolygons)
+      );
     }
     return MapEditor.PathOps.unionIntoShape(result, worldPolys);
   }
 
-  function _shapeToWorldPolys(shape) {
-    return MapEditor.PathOps.clipperToWorld(shape.clipperPolygons);
-  }
-
-  /**
-   * Subtract worldPolys from all UserObjects other than excludeId.
-   * Saves and restores _lastEditedId so that Ctrl+click and Shift+draw
-   * always target the object the user explicitly drew on, not the last
-   * neighbour that happened to be shrunk.
-   */
   function _subtractFromNeighbours(worldPolys, excludeId) {
-    // Save before iterating — setShapes() would clobber _lastEditedId.
     const savedId = MapEditor.UserObjects.getLastEdited()
-      ? MapEditor.UserObjects.getLastEdited().id
-      : null;
+      ? MapEditor.UserObjects.getLastEdited().id : null;
 
     for (const obj of MapEditor.UserObjects.getAll().slice()) {
       if (obj.id === excludeId) continue;
@@ -408,27 +325,24 @@
       MapEditor.UserObjects.setShapes(obj.id, newShapes);
     }
 
-    // Restore so the target object remains "last edited".
     if (savedId) MapEditor.UserObjects.setLastEdited(savedId);
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
   function _pushUndo() {
-    const snap = MapEditor.UserObjects.snapshot();
-    MapEditor.undoStack.push(snap);
-    if (MapEditor.UI && MapEditor.UI.refreshUndoButtons) {
-      MapEditor.UI.refreshUndoButtons();
-    }
+    MapEditor.undoStack.push(MapEditor.UserObjects.snapshot());
+    if (MapEditor.UI && MapEditor.UI.refreshUndoButtons) MapEditor.UI.refreshUndoButtons();
   }
 
   function _reset() {
-    _drawing         = false;
-    _targetObjId     = null;
-    _targetIsNew     = false;
-    _hasPrevDisk     = false;
-    _diskTrail       = [];
-    _preDrawSnapshot = null;
+    _drawing             = false;
+    _targetObjId         = null;
+    _targetIsNew         = false;
+    _usingLiveExpansion  = false;
+    _hasPrevDisk         = false;
+    _diskTrail           = [];
+    _preDrawSnapshot     = null;
   }
 
   // ── Export ────────────────────────────────────────────────────────────────

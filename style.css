@@ -143,22 +143,30 @@ body {
 #titleEditWrap {
   pointer-events: all;
   z-index: 10;
+  /* JS sets left/top to the title's screen center; this centers the input on it */
+  transform: translate(-50%, -50%);
 }
 #titleEditInput {
-  background: rgba(0,0,0,0.6);
-  border: 1.5px solid rgba(255,255,255,0.5);
-  border-radius: 4px;
-  color: #fff;
-  font-size: 16px;        /* overridden dynamically by titleRenderer */
-  font-family: "Palatino Linotype", Palatino, serif;
-  padding: 2px 6px;
+  background: transparent;
+  border: none;
+  border-bottom: 1.5px solid currentColor;
+  border-radius: 0;
+  color: #fff;             /* overridden by JS */
+  font-size: 18px;         /* overridden by JS */
+  font-family: "Palatino Linotype", Palatino, "Book Antiqua", serif;
+  font-weight: 600;
+  padding: 0 4px 2px;
   outline: none;
-  min-width: 80px;
+  min-width: 40px;
   text-align: center;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+  line-height: 1;
+  -webkit-appearance: none;
+  appearance: none;
 }
 #titleEditInput:focus {
-  border-color: #4a90d9;
-  box-shadow: 0 0 0 2px rgba(74,144,217,0.35);
+  border-bottom-color: rgba(255,255,255,0.95);
+  box-shadow: none;
 }
 
 /* ── Scrollbar hiding for the whole page ──────────────────────────────── */

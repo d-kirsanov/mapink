@@ -65,6 +65,10 @@
     canvas.addEventListener('pointerdown', (e) => {
       if (e.button !== 1) return;   // middle button only
       e.preventDefault();
+      // Finalise any running expansion so it doesn't resume under a different pan position.
+      if (MapEditor.Expansion && MapEditor.Expansion.isActive()) {
+        MapEditor.Expansion.stop();
+      }
       _panPointerId = e.pointerId;
       _panLastX     = e.clientX;
       _panLastY     = e.clientY;

@@ -1,55 +1,41 @@
 /**
  * src/expansion.js
  *
- * Animated morphological expansion engine — the key feature of the app.
+ * Animated morphological expansion engine — live mode rewrite.
  *
- * ── Fixes in this version ────────────────────────────────────────────────────
+ * ── New lifecycle ────────────────────────────────────────────────────────────
  *
- *  1. SEA CLIPPING
- *     After rasterising the trail, if ANY disk center is on a static-path fill
- *     (land), all trail pixels outside land fills are zeroed out before seeds
- *     are identified.  If ALL centers are on sea, the trail is left untouched
- *     (allows drawing sea-based regions).
+ *  mousedown  → Expansion.startLive(objId, mode, isNew, preSnap)
+ *                 initialise masks, start constant-speed rAF loop
+ *  mousemove  → Expansion.addSeeds(sx, sy, radius)
+ *                 paint disk pixels into _addedMask, extend frontier
+ *  mouseup    → Expansion.finishLive()
+ *                 switch rAF loop to exponential-decay mode
+ *  auto-stop  → _finalize() when speed < threshold
+ *  Space/zoom → Expansion.stop()   (finalize immediately)
+ *  Ctrl+Z     → Expansion.cancel() (discard, restore preSnap)
  *
- *  2. ZOOM / NEW-DRAW INTERRUPTION
- *     Expansion.stop()   — finalize + push to undoStack (zoom, new draw start)
- *     Expansion.cancel() — discard + restore pre-draw snapshot (Ctrl+Z during
- *                          expansion, or any other abort-without-commit path)
- *     Both cancel the rAF before the viewport changes, so tracing always runs
- *     under the same viewport that was active when drawing started.
+ * ── Removed ──────────────────────────────────────────────────────────────────
+ *  • _edgeWeight / tentacle taper  — triangle profile now emerges naturally
+ *    because the base of the stroke starts expanding earlier than the tip.
+ *  • diskCenters parameter on start() — sea-clipping now happens per-disk in
+ *    addSeeds(), so each disk is checked as it arrives.
  *
- *  3. UNDO SEMANTICS  (coordinated with drawTool.js)
- *     undoStack.push() is called ONCE per gesture, inside _finalize()/_finalizeImmediate(),
- *     AFTER the polygons have been applied to UserObjects.
- *     drawTool.mouseup no longer pushes.
- *     Ctrl+Z during expansion calls cancel() (restores pre-draw snapshot without
- *     popping the undo stack) — the in-progress gesture is simply discarded.
- *
- *  4. ERASE RIND
- *     Before building the final canvas, the erase _addedMask is dilated by 1px
- *     (within _baseMask) so the traced polygon covers the full raster boundary
- *     and Clipper difference leaves no thin outline.
- *
- *  5. ORGANIC SHAPES
- *     Each boundary pixel's advance is multiplied by _pixelNoise(px): a
- *     spatially-coherent, per-gesture-randomised sine noise in [0.6, 1.4].
- *     Nearby pixels share similar noise (coherent blobs), but the pattern is
- *     different every gesture (randomised offset).
- *
- *  6. RESISTANCE IN ENEMY TERRITORY
- *     A separate _otherObjMask is built (does NOT block; expansion still
- *     crosses into other objects).  When a frontier pixel is inside another
- *     object, the effective advance is multiplied by EXPANSION_RESISTANCE_FACTOR
- *     (see config.js), slowing but not stopping the encroachment.
+ * ── Kept ─────────────────────────────────────────────────────────────────────
+ *  • Resistance in enemy territory (_otherObjMask × EXPANSION_RESISTANCE_FACTOR)
+ *  • Organic noise (_pixelNoise) — spatially-coherent multi-sine, random per gesture
+ *  • Circular frontier — diagonal pixels advance √2× slower (distFactor in Map)
+ *  • Erase dilation — 3px (increased from 1px) before tracing to kill rind artefact
+ *  • Sea clipping — per disk-center check against land-fill mask
  *
  * ── Raster arrays (W×H screen pixels) ────────────────────────────────────────
- *  _addedMask   Uint8Array    pixels added by seeds + expansion
- *  _baseMask    Uint8Array    original target-object pixels (fixed)
- *  _blocked     Uint8Array    pixels that hard-stop expansion
- *  _otherObjMask Uint8Array   pixels of other objects (resistance, not block)
- *  _edgeWeight  Float32Array  tentacle taper: 1.0 at base, ~0 at tip
- *  _accum       Float32Array  fractional expansion pressure per boundary px
- *  _boundary    Map<int,float> frontier: index → distFactor (1 or √2)
+ *  _addedMask    Uint8Array    pixels added by seeds + expansion
+ *  _baseMask     Uint8Array    target-object pixels at gesture start (fixed)
+ *  _blocked      Uint8Array    hard-stop pixels (static strokes; outside-obj for erase)
+ *  _otherObjMask Uint8Array    other-object pixels (resistance multiplier, not block)
+ *  _accum        Float32Array  fractional advance pressure per boundary pixel
+ *  _boundary     Map<int,float> frontier: index → distFactor (1 = cardinal, √2 = diagonal)
+ *  _landData     Uint8Array    static-fill pixels (land) — for sea clipping in addSeeds
  */
 
 (function (MapEditor) {
@@ -59,32 +45,34 @@
 
   // ── Module state ─────────────────────────────────────────────────────────
 
-  let _active           = false;
-  let _mode             = 'add';
-  let _targetObjId      = null;
-  let _targetIsNew      = false;
-  let _preDrawSnapshot  = null;   // for cancel() recovery
+  let _active          = false;
+  let _liveMode        = false;   // true while mouse is held; false during decay
+  let _decayStartTime  = 0;       // performance.now() at finishLive()
+
+  let _mode            = 'add';
+  let _targetObjId     = null;
+  let _targetIsNew     = false;
+  let _preDrawSnapshot = null;
 
   let _W = 0, _H = 0;
 
-  let _addedMask;      // Uint8Array
-  let _baseMask;       // Uint8Array
-  let _blocked;        // Uint8Array
-  let _otherObjMask;   // Uint8Array  (resistance, not hard-block)
-  let _edgeWeight;     // Float32Array
-  let _accum;          // Float32Array
-  let _boundary;       // Map<int, float>
+  let _addedMask;       // Uint8Array
+  let _baseMask;        // Uint8Array
+  let _blocked;         // Uint8Array
+  let _otherObjMask;    // Uint8Array | null
+  let _accum;           // Float32Array
+  let _boundary;        // Map<int, float>
+  let _landData;        // Uint8Array | null  (land-fill mask for sea clipping)
+  let _anyLandCenter   = false;   // has any disk center landed on land?
 
   let _overlayCanvas  = null;
   let _overlayCtx     = null;
   let _overlayImgData = null;
-  let _overlayR = 0, _overlayG = 0, _overlayB = 0, _overlayAlpha = 240;
+  let _overlayR = 0, _overlayG = 0, _overlayB = 0, _overlayAlpha = 245;
 
-  let _startTime     = 0;
   let _lastFrameTime = 0;
   let _rafHandle     = null;
-
-  let _noiseOffset   = 0;   // randomised per gesture
+  let _noiseOffset   = 0;
 
   // ── Public API ────────────────────────────────────────────────────────────
 
@@ -99,23 +87,21 @@
 
   Expansion.isActive = () => _active;
 
-  /** Composite live expansion overlay (screen space, no extra alpha). */
   Expansion.drawOverlay = function (ctx) {
     if (!_active || !_overlayCanvas) return;
     ctx.drawImage(_overlayCanvas, 0, 0);
   };
 
   /**
-   * Begin expansion from the current trail canvas.
+   * Begin live expansion (called on mousedown).
    *
-   * @param {string}                      targetObjId
-   * @param {'add'|'erase'}               mode
-   * @param {boolean}                     targetIsNew
-   * @param {Array<{sx:number,sy:number}>} diskCenters   screen-space disk centers
-   * @param {object}                      preDrawSnapshot snapshot for cancel()
+   * @param {string}          targetObjId
+   * @param {'add'|'erase'}   mode
+   * @param {boolean}         targetIsNew
+   * @param {object}          preDrawSnapshot   — for cancel() recovery
    */
-  Expansion.start = function (targetObjId, mode, targetIsNew, diskCenters, preDrawSnapshot) {
-    if (_active) _cancel();   // shouldn't normally happen
+  Expansion.startLive = function (targetObjId, mode, targetIsNew, preDrawSnapshot) {
+    if (_active) _hardCancel();
 
     _syncSize();
     if (_W === 0 || _H === 0) return;
@@ -125,77 +111,103 @@
     _targetIsNew     = targetIsNew;
     _preDrawSnapshot = preDrawSnapshot || null;
     _noiseOffset     = Math.random() * 1000;
+    _anyLandCenter   = false;
+    _liveMode        = true;
 
-    const viewport = MapEditor.viewport;
     const n        = _W * _H;
+    const viewport = MapEditor.viewport;
 
-    // ── Get trail ──────────────────────────────────────────────────────
-    const trailCanvas = MapEditor.RasterOps.getTrailCanvas();
-    const trailData   = _readAlpha(trailCanvas);   // mutable copy
-
-    // ── Sea clipping ───────────────────────────────────────────────────
-    // If ANY disk center lands on a static fill (land), clip the trail
-    // so that pixels outside land fills are removed.  This prevents
-    // over-water expansion when the user draws near a coastline.
-    // Exception: if ALL centers are on sea, allow the full trail (sea region).
-    const landCanvas = MapEditor.RasterOps.renderStaticPathFillMask(viewport);
-    const landData   = _readAlpha(landCanvas);
-    const hasAnyLand = landData.indexOf(1) >= 0;
-
-    if (hasAnyLand && diskCenters && diskCenters.length > 0) {
-      let anyOnLand = false;
-      for (const { sx, sy } of diskCenters) {
-        const ix = Math.round(sx), iy = Math.round(sy);
-        if (ix >= 0 && ix < _W && iy >= 0 && iy < _H) {
-          if (landData[iy * _W + ix]) { anyOnLand = true; break; }
-        }
-      }
-      if (anyOnLand) {
-        // Remove trail pixels that are outside all land fills.
-        for (let px = 0; px < n; px++) {
-          if (!landData[px]) trailData[px] = 0;
-        }
-      }
-    }
-
-    // ── Rasterise target object ────────────────────────────────────────
+    // Rasterise target object (fixed snapshot).
     const objCanvas = MapEditor.RasterOps.renderObjectMask(
       MapEditor.UserObjects.getById(targetObjId) || { shapes: [] }, viewport
     );
     _baseMask = _readAlpha(objCanvas);
 
-    // ── Other-object mask (resistance, NOT hard-block) ─────────────────
+    // Land-fill mask for per-disk sea clipping.
+    const landCanvas = MapEditor.RasterOps.renderStaticPathFillMask(viewport);
+    _landData = _readAlpha(landCanvas);
+    if (_landData.indexOf(1) < 0) _landData = null;  // all ocean map → skip clipping
+
+    // Resistance mask (other objects).
     _otherObjMask = _buildOtherObjMask(targetObjId, viewport);
 
-    // ── Blocked mask (static strokes + erase-mode boundary) ───────────
+    // Blocked mask.
     _blocked = _buildBlockedMask(viewport);
 
-    // ── Identify seeds ─────────────────────────────────────────────────
-    _addedMask  = new Uint8Array(n);
-    _edgeWeight = new Float32Array(n);
-    _accum      = new Float32Array(n);
-    _boundary   = new Map();
+    // Initialise empty raster state.
+    _addedMask = new Uint8Array(n);
+    _accum     = new Float32Array(n);
+    _boundary  = new Map();
 
-    let hasSeeds = false;
-    for (let px = 0; px < n; px++) {
-      if (!trailData[px]) continue;
-      const inObj = !!_baseMask[px];
-      if (mode === 'add'   && !inObj) { _addedMask[px] = 1; hasSeeds = true; }
-      if (mode === 'erase' && inObj)  { _addedMask[px] = 1; hasSeeds = true; }
+    // Overlay colour.
+    if (mode === 'add') {
+      const obj = MapEditor.UserObjects.getById(targetObjId);
+      const rgb = MapEditor.ColorUtils.hexToRgb(obj ? obj.color : '#ffffff');
+      _overlayR = rgb.r; _overlayG = rgb.g; _overlayB = rgb.bv;
+      _overlayAlpha = 245;
+    } else {
+      _overlayR = 210; _overlayG = 45; _overlayB = 45;
+      _overlayAlpha = 150;
     }
 
-    if (!hasSeeds) {
-      // Trail entirely inside (add) or outside (erase) → commit immediately.
-      _finalizeImmediate(trailData);
-      return;
+    _overlayCtx.clearRect(0, 0, _W, _H);
+    _overlayImgData = _overlayCtx.createImageData(_W, _H);
+
+    _active        = true;
+    _lastFrameTime = performance.now();
+    _rafHandle     = requestAnimationFrame(_frame);
+  };
+
+  /**
+   * Add a disk of seed pixels at screen position (sx, sy) with given radius.
+   * Called from drawTool on every emitted disk while mouse is held.
+   * Handles sea clipping internally.
+   *
+   * @param {number} sx      screen x of disk center
+   * @param {number} sy      screen y of disk center
+   * @param {number} radius  disk radius in screen pixels
+   */
+  Expansion.addSeeds = function (sx, sy, radius) {
+    if (!_active || !_liveMode) return;
+
+    const cx_i = Math.round(sx);
+    const cy_i = Math.round(sy);
+
+    // ── Sea clipping ────────────────────────────────────────────────────
+    // If this center is on sea AND we already have land-based centers,
+    // skip this disk (land has priority).
+    if (_landData) {
+      const inBounds = cx_i >= 0 && cx_i < _W && cy_i >= 0 && cy_i < _H;
+      const onLand   = inBounds ? !!_landData[cy_i * _W + cx_i] : false;
+      if (onLand) {
+        _anyLandCenter = true;
+      } else if (_anyLandCenter) {
+        return;   // sea disk after land centers — skip
+      }
     }
 
-    // ── Edge weights (tentacle taper) ──────────────────────────────────
-    _computeEdgeWeights(trailData);
+    // ── Paint disk into _addedMask ──────────────────────────────────────
+    const r  = Math.ceil(radius);
+    const r2 = radius * radius;
+    const newSeeds = [];
 
-    // ── Build initial frontier ─────────────────────────────────────────
-    for (let px = 0; px < n; px++) {
-      if (!_addedMask[px]) continue;
+    for (let dy = -r; dy <= r; dy++) {
+      const ny = cy_i + dy;
+      if (ny < 0 || ny >= _H) continue;
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy > r2) continue;
+        const nx = cx_i + dx;
+        if (nx < 0 || nx >= _W) continue;
+        const px = ny * _W + nx;
+        if (_addedMask[px] || _blocked[px]) continue;
+        _addedMask[px] = 1;
+        _boundary.delete(px);   // it's now inside, not a frontier pixel
+        newSeeds.push(px);
+      }
+    }
+
+    // ── Extend frontier from new seeds ──────────────────────────────────
+    for (const px of newSeeds) {
       _forEachNeighbor8(px, (npx, df) => {
         if (_addedMask[npx] || _blocked[npx]) return;
         if (!_boundary.has(npx) || _boundary.get(npx) > df) {
@@ -204,56 +216,39 @@
       });
     }
 
-    // ── Overlay colour ─────────────────────────────────────────────────
-    if (mode === 'add') {
-      const obj = MapEditor.UserObjects.getById(targetObjId);
-      const rgb = MapEditor.ColorUtils.hexToRgb(obj ? obj.color : '#ffffff');
-      _overlayR = rgb.r; _overlayG = rgb.g; _overlayB = rgb.bv;
-      _overlayAlpha = 245;   // near-opaque → growth blends with existing fill
-    } else {
-      _overlayR = 210; _overlayG = 45; _overlayB = 45;
-      _overlayAlpha = 150;
-    }
-
-    _overlayCtx.clearRect(0, 0, _W, _H);
-    _overlayImgData = _overlayCtx.createImageData(_W, _H);
-    _paintMask(_addedMask);
-
-    // ── Start animation ────────────────────────────────────────────────
-    _active        = true;
-    _startTime     = performance.now();
-    _lastFrameTime = _startTime;
-    _rafHandle     = requestAnimationFrame(_frame);
+    if (newSeeds.length > 0) _paintPixels(newSeeds);
   };
 
   /**
-   * Finalize with current mask (stop animation, commit polygons, push undo).
-   * Called from: zoom wheel, new draw mousedown, Space key.
+   * Mouse released — switch from constant-speed to decay mode.
+   * The rAF loop continues; finalization happens automatically when
+   * speed falls below the stop threshold.
    */
+  Expansion.finishLive = function () {
+    if (!_active || !_liveMode) return;
+    _liveMode       = false;
+    _decayStartTime = performance.now();
+  };
+
+  /** Finalize immediately (Space key, zoom, new draw start). */
   Expansion.stop = function () {
     if (!_active) return;
+    _liveMode = false;    // ensure we're in decay mode if we weren't already
     _finalize();
   };
 
   /**
-   * Discard the in-progress expansion and restore the pre-draw state.
-   * Called from: Ctrl+Z during expansion.
+   * Discard the gesture and restore the pre-draw snapshot (Ctrl+Z during expansion).
    * Does NOT push to undoStack.
    */
   Expansion.cancel = function () {
     if (!_active) return;
     if (_rafHandle) { cancelAnimationFrame(_rafHandle); _rafHandle = null; }
-    _active = false;
-
-    // Restore state to what it was before the draw gesture began.
-    if (_preDrawSnapshot) {
-      MapEditor.UserObjects.applySnapshot(_preDrawSnapshot);
-    }
+    _active   = false;
+    _liveMode = false;
+    if (_preDrawSnapshot) MapEditor.UserObjects.applySnapshot(_preDrawSnapshot);
     _cleanup();
-
-    if (MapEditor.UI && MapEditor.UI.refreshUndoButtons) {
-      MapEditor.UI.refreshUndoButtons();
-    }
+    if (MapEditor.UI && MapEditor.UI.refreshUndoButtons) MapEditor.UI.refreshUndoButtons();
   };
 
   // ── rAF frame ─────────────────────────────────────────────────────────────
@@ -263,60 +258,49 @@
 
     const dt = Math.min((now - _lastFrameTime) / 1000, 0.1);
     _lastFrameTime = now;
-    const t = (now - _startTime) / 1000;
 
-    const decayBase = MapEditor.expansionDecay || MapEditor.Config.EXPANSION_DECAY_DEFAULT;
-    const decay     = _mode === 'erase'
-      ? decayBase * MapEditor.Config.EXPANSION_ERASE_PENALTY
-      : decayBase;
+    let speed;
+    if (_liveMode) {
+      // Constant speed while mouse is held.
+      speed = MapEditor.Config.EXPANSION_INIT_SPEED_PX;
+    } else {
+      // Exponential decay after mouse release.
+      const tDecay   = (now - _decayStartTime) / 1000;
+      const decayBase = MapEditor.expansionDecay || MapEditor.Config.EXPANSION_DECAY_DEFAULT;
+      const decay     = _mode === 'erase'
+        ? decayBase * MapEditor.Config.EXPANSION_ERASE_PENALTY
+        : decayBase;
+      speed = MapEditor.Config.EXPANSION_INIT_SPEED_PX * Math.exp(-decay * tDecay);
 
-    const speed = MapEditor.Config.EXPANSION_INIT_SPEED_PX * Math.exp(-decay * t);
-
-    if (speed < MapEditor.Config.EXPANSION_STOP_THRESHOLD_PX || _boundary.size === 0) {
-      _finalize();
-      return;
+      if (speed < MapEditor.Config.EXPANSION_STOP_THRESHOLD_PX || _boundary.size === 0) {
+        _finalize();
+        return;
+      }
     }
 
     const advance    = speed * dt;
-    const newPixels  = [];
     const resistance = MapEditor.Config.EXPANSION_RESISTANCE_FACTOR;
+    const newPixels  = [];
 
     for (const [px, distFactor] of _boundary) {
       if (_addedMask[px] || _blocked[px]) continue;
 
-      // Best edge-weight from any in-mask / base-object neighbour.
-      let w = 0;
-      _forEachNeighbor8(px, (npx) => {
-        if (_addedMask[npx] && _edgeWeight[npx] > w) w = _edgeWeight[npx];
-        if (_mode === 'add' && _baseMask[npx] && w < 1.0) w = 1.0;
-      });
-      if (w <= 0) continue;
-
-      // Resistance when crossing into another object's territory.
-      const res = (_mode === 'add' && _otherObjMask && _otherObjMask[px])
-        ? resistance : 1.0;
-
-      // Organic noise (spatially coherent, per-gesture unique).
+      const res   = (_mode === 'add' && _otherObjMask && _otherObjMask[px]) ? resistance : 1.0;
       const noise = _pixelNoise(px);
 
-      // Diagonal pixels (distFactor = √2) accumulate slower → circular frontier.
-      _accum[px] += (advance * w * res * noise) / distFactor;
+      _accum[px] += (advance * res * noise) / distFactor;
 
       if (_accum[px] >= 1.0) {
-        _addedMask[px]  = 1;
-        _edgeWeight[px] = w;   // inherit → tentacle continues
+        _addedMask[px] = 1;
         newPixels.push(px);
       }
     }
 
-    // Update frontier.
     for (const px of newPixels) {
       _boundary.delete(px);
       _forEachNeighbor8(px, (npx, df) => {
         if (_addedMask[npx] || _blocked[npx]) return;
-        if (!_boundary.has(npx) || _boundary.get(npx) > df) {
-          _boundary.set(npx, df);
-        }
+        if (!_boundary.has(npx) || _boundary.get(npx) > df) _boundary.set(npx, df);
       });
     }
 
@@ -327,68 +311,50 @@
 
   // ── Finalisation ──────────────────────────────────────────────────────────
 
-  /**
-   * Convert current _addedMask → world polygons → apply boolean op →
-   * push to undoStack.  Called by stop() and the auto-stop at end of animation.
-   */
   function _finalize() {
     if (_rafHandle) { cancelAnimationFrame(_rafHandle); _rafHandle = null; }
 
-    // ── Erase rind fix: dilate erase mask 1px within _baseMask ────────────
-    // The marching-squares tracer produces a polygon that is ~0.5px inside
-    // the raster boundary.  Dilating by 1px ensures the Clipper difference
-    // covers the full boundary, leaving no thin outline.
+    const n = _W * _H;
+
+    // ── Erase rind fix: dilate _addedMask 3px within _baseMask ───────────
+    // Marching squares traces ~0.5–1px inside the raster boundary.
+    // 3px dilation ensures the Clipper difference eliminates the full edge,
+    // leaving no visible rind outline.
     if (_mode === 'erase') {
-      const n    = _W * _H;
       const extra = new Uint8Array(n);
       for (let px = 0; px < n; px++) {
         if (!_addedMask[px]) continue;
-        const x = px % _W, y = (px / _W) | 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            if (dx === 0 && dy === 0) continue;
-            const nx = x + dx, ny = y + dy;
-            if (nx >= 0 && nx < _W && ny >= 0 && ny < _H) {
-              const npx = ny * _W + nx;
-              if (_baseMask[npx]) extra[npx] = 1;
-            }
+        const x0 = px % _W, y0 = (px / _W) | 0;
+        for (let dy = -3; dy <= 3; dy++) {
+          const ny = y0 + dy;
+          if (ny < 0 || ny >= _H) continue;
+          for (let dx = -3; dx <= 3; dx++) {
+            if (dx * dx + dy * dy > 9) continue;   // 3px circle
+            const nx = x0 + dx;
+            if (nx < 0 || nx >= _W) continue;
+            const npx = ny * _W + nx;
+            if (_baseMask[npx]) extra[npx] = 1;
           }
         }
       }
       for (let px = 0; px < n; px++) if (extra[px]) _addedMask[px] = 1;
     }
 
-    // ── Build final canvas ────────────────────────────────────────────────
+    // ── Build final canvas from _addedMask ────────────────────────────────
     const finalCanvas = document.createElement('canvas');
     finalCanvas.width  = _W;
     finalCanvas.height = _H;
     const fCtx = finalCanvas.getContext('2d');
     const imgd = fCtx.createImageData(_W, _H);
     const d    = imgd.data;
-
-    for (let px = 0; px < _W * _H; px++) {
-      if (_addedMask[px]) {
-        const i = px * 4;
-        d[i] = d[i+1] = d[i+2] = d[i+3] = 255;
-      }
+    for (let px = 0; px < n; px++) {
+      if (_addedMask[px]) { const i = px*4; d[i]=d[i+1]=d[i+2]=d[i+3]=255; }
     }
-
-    // For add mode: also include trail pixels that were inside the object so
-    // the traced polygon closes seamlessly against the existing shape.
-    if (_mode === 'add') {
-      const trailData = _readAlpha(MapEditor.RasterOps.getTrailCanvas());
-      for (let px = 0; px < _W * _H; px++) {
-        if (trailData[px] && _baseMask[px]) {
-          const i = px * 4;
-          d[i] = d[i+1] = d[i+2] = d[i+3] = 255;
-        }
-      }
-    }
-
     fCtx.putImageData(imgd, 0, 0);
 
     const worldPolys = MapEditor.Tracing.traceCanvas(finalCanvas, MapEditor.viewport);
-    _active = false;
+    _active   = false;
+    _liveMode = false;
 
     if (!worldPolys || worldPolys.length === 0) {
       if (_targetIsNew) MapEditor.UserObjects.remove(_targetObjId);
@@ -398,62 +364,23 @@
       );
     }
 
-    // ── Push to undo stack AFTER applying ─────────────────────────────────
     MapEditor.undoStack.push(MapEditor.UserObjects.snapshot());
-    if (MapEditor.UI && MapEditor.UI.refreshUndoButtons) {
-      MapEditor.UI.refreshUndoButtons();
-    }
+    if (MapEditor.UI && MapEditor.UI.refreshUndoButtons) MapEditor.UI.refreshUndoButtons();
 
     _cleanup();
   }
 
-  /**
-   * No seeds → commit the raw (clipped) trail immediately.
-   * @param {Uint8Array} trailData  already sea-clipped
-   */
-  function _finalizeImmediate(trailData) {
-    // Build a canvas from the clipped trail data.
-    const canvas = document.createElement('canvas');
-    canvas.width  = _W;
-    canvas.height = _H;
-    const ctx  = canvas.getContext('2d');
-    const imgd = ctx.createImageData(_W, _H);
-    const d    = imgd.data;
-    for (let px = 0; px < _W * _H; px++) {
-      if (trailData[px]) {
-        const i = px * 4;
-        d[i] = d[i+1] = d[i+2] = d[i+3] = 255;
-      }
-    }
-    ctx.putImageData(imgd, 0, 0);
-
-    const worldPolys = MapEditor.Tracing.traceCanvas(canvas, MapEditor.viewport);
-
-    if (!worldPolys || worldPolys.length === 0) {
-      if (_targetIsNew) MapEditor.UserObjects.remove(_targetObjId);
-    } else {
-      MapEditor.DrawTool.applyPolygonsToTarget(
-        worldPolys, _targetObjId, _mode, _targetIsNew
-      );
-    }
-
-    // Push after (consistent with _finalize).
-    MapEditor.undoStack.push(MapEditor.UserObjects.snapshot());
-    if (MapEditor.UI && MapEditor.UI.refreshUndoButtons) {
-      MapEditor.UI.refreshUndoButtons();
-    }
-  }
-
-  function _cancel() {
+  function _hardCancel() {
     if (_rafHandle) { cancelAnimationFrame(_rafHandle); _rafHandle = null; }
-    _active = false;
+    _active = _liveMode = false;
     _cleanup();
   }
 
   function _cleanup() {
-    _addedMask = _baseMask = _blocked = _otherObjMask = _edgeWeight = _accum = null;
+    _addedMask = _baseMask = _blocked = _otherObjMask = _accum = _landData = null;
     _boundary  = new Map();
     _preDrawSnapshot = null;
+    _anyLandCenter   = false;
     if (_overlayCtx) _overlayCtx.clearRect(0, 0, _W, _H);
     _overlayImgData = null;
   }
@@ -461,145 +388,60 @@
   // ── Blocked mask ──────────────────────────────────────────────────────────
 
   /**
-   * Hard-stop pixels.
-   *
-   * Add mode:   static path strokes (coastlines) only.
-   *             Other user objects are NOT blocked — A can expand into B;
-   *             B gets trimmed by applyPolygonsToTarget afterward.
-   *
-   * Erase mode: static path strokes + pixels outside the target object.
+   * Add mode:   static strokes only (other objects NOT blocked — resistance instead).
+   * Erase mode: static strokes + pixels outside target object.
    */
   function _buildBlockedMask(viewport) {
     const n       = _W * _H;
     const blocked = new Uint8Array(n);
 
-    // Static path strokes — always hard stop.
     const strokeCanvas = MapEditor.RasterOps.renderStaticPathStrokeMask(viewport);
     const strokeData   = _readAlpha(strokeCanvas);
-    for (let px = 0; px < n; px++) {
-      if (strokeData[px]) blocked[px] = 1;
-    }
+    for (let px = 0; px < n; px++) if (strokeData[px]) blocked[px] = 1;
 
-    // Erase: also block pixels outside the target object.
     if (_mode === 'erase') {
-      for (let px = 0; px < n; px++) {
-        if (!_baseMask[px]) blocked[px] = 1;
-      }
+      for (let px = 0; px < n; px++) if (!_baseMask[px]) blocked[px] = 1;
     }
 
     return blocked;
   }
 
-  /**
-   * Build a mask of all OTHER user objects' pixels.
-   * Used for the resistance calculation (slows expansion; does not stop it).
-   */
   function _buildOtherObjMask(excludeId, viewport) {
-    const aggregate = { shapes: [] };
+    const agg = { shapes: [] };
     for (const obj of MapEditor.UserObjects.getAll()) {
       if (obj.id === excludeId) continue;
-      for (const s of obj.shapes) aggregate.shapes.push(s);
+      for (const s of obj.shapes) agg.shapes.push(s);
     }
-    if (aggregate.shapes.length === 0) return null;
-
-    const canvas = MapEditor.RasterOps.renderObjectMask(aggregate, viewport);
-    return _readAlpha(canvas);
-  }
-
-  // ── Edge weight computation (tentacle taper) ──────────────────────────────
-
-  function _computeEdgeWeights(trailData) {
-    const n    = _W * _H;
-    const dist = new Float32Array(n).fill(Infinity);
-    const queue = [];
-
-    if (_mode === 'add') {
-      for (let px = 0; px < n; px++) {
-        if (!_addedMask[px]) continue;
-        let adj = false;
-        for (const npx of _n4(px)) { if (_baseMask[npx]) { adj = true; break; } }
-        if (adj) { dist[px] = 0; queue.push(px); }
-      }
-    } else {
-      for (let px = 0; px < n; px++) {
-        if (!_addedMask[px]) continue;
-        let adj = false;
-        for (const npx of _n4(px)) { if (!_baseMask[npx]) { adj = true; break; } }
-        if (adj) { dist[px] = 0; queue.push(px); }
-      }
-    }
-
-    if (queue.length === 0) {
-      for (let px = 0; px < n; px++) {
-        if (_addedMask[px]) { dist[px] = 0; queue.push(px); }
-      }
-    }
-
-    let head = 0;
-    while (head < queue.length) {
-      const px = queue[head++];
-      for (const npx of _n4(px)) {
-        if (_addedMask[npx] && dist[npx] === Infinity) {
-          dist[npx] = dist[px] + 1;
-          queue.push(npx);
-        }
-      }
-    }
-
-    let maxDist = 0;
-    for (let px = 0; px < n; px++) {
-      if (_addedMask[px] && dist[px] !== Infinity && dist[px] > maxDist) maxDist = dist[px];
-    }
-
-    const FLOOR = 0.05;
-    for (let px = 0; px < n; px++) {
-      if (!_addedMask[px]) continue;
-      _edgeWeight[px] = dist[px] === Infinity
-        ? FLOOR
-        : Math.max(FLOOR, maxDist > 0 ? 1.0 - dist[px] / maxDist : 1.0);
-    }
+    if (agg.shapes.length === 0) return null;
+    return _readAlpha(MapEditor.RasterOps.renderObjectMask(agg, viewport));
   }
 
   // ── Organic noise ─────────────────────────────────────────────────────────
 
   /**
-   * Spatially-coherent noise in [0.6, 1.4].
-   *
-   * Multi-frequency sine functions give smooth, organic blobs at the expansion
-   * frontier.  _noiseOffset is randomised each gesture so the pattern varies.
-   *
-   * The three frequencies (0.23, 0.51, 0.11) have no common divisor, avoiding
-   * repeating grid artefacts.
+   * Spatially-coherent, per-gesture noise in [0.55, 1.45].
+   * Three incommensurable sine frequencies → no repeating grid artefacts.
    */
   function _pixelNoise(px) {
-    const x = px % _W;
-    const y = (px / _W) | 0;
-    const s1 = Math.sin(x * 0.23 + y * 0.41 + _noiseOffset)            * 0.5 + 0.5;
-    const s2 = Math.sin(x * 0.51 - y * 0.37 + _noiseOffset * 1.7 + 2.1) * 0.5 + 0.5;
-    const s3 = Math.sin(x * 0.11 + y * 0.83 + _noiseOffset * 0.9 + 4.3) * 0.5 + 0.5;
-    return 0.6 + s1 * 0.27 + s2 * 0.27 + s3 * 0.26;   // [0.6, 1.4]
+    const x  = px % _W;
+    const y  = (px / _W) | 0;
+    const s1 = Math.sin(x * 0.23  + y * 0.41  + _noiseOffset);
+    const s2 = Math.sin(x * 0.51  - y * 0.37  + _noiseOffset * 1.7 + 2.1);
+    const s3 = Math.sin(x * 0.117 + y * 0.839 + _noiseOffset * 0.9 + 4.3);
+    return 0.55 + (s1 + s2 + s3 + 3.0) * (0.90 / 6.0);  // ≈ [0.55, 1.45]
   }
 
   // ── Overlay helpers ───────────────────────────────────────────────────────
-
-  function _paintMask(mask) {
-    if (!_overlayImgData) return;
-    const d = _overlayImgData.data;
-    const n = _W * _H;
-    for (let px = 0; px < n; px++) {
-      if (!mask[px]) continue;
-      const i = px * 4;
-      d[i] = _overlayR; d[i+1] = _overlayG; d[i+2] = _overlayB; d[i+3] = _overlayAlpha;
-    }
-    _overlayCtx.putImageData(_overlayImgData, 0, 0);
-  }
 
   function _paintPixels(pixels) {
     if (!_overlayImgData || pixels.length === 0) return;
     const d = _overlayImgData.data;
     for (const px of pixels) {
       const i = px * 4;
-      d[i] = _overlayR; d[i+1] = _overlayG; d[i+2] = _overlayB; d[i+3] = _overlayAlpha;
+      d[i]   = _overlayR;
+      d[i+1] = _overlayG;
+      d[i+2] = _overlayB;
+      d[i+3] = _overlayAlpha;
     }
     _overlayCtx.putImageData(_overlayImgData, 0, 0);
   }
@@ -620,17 +462,7 @@
     }
   }
 
-  function _n4(px) {
-    const x = px % _W, y = (px / _W) | 0;
-    const r = [];
-    if (x > 0)      r.push(px - 1);
-    if (x < _W - 1) r.push(px + 1);
-    if (y > 0)      r.push(px - _W);
-    if (y < _H - 1) r.push(px + _W);
-    return r;
-  }
-
-  // ── Utilities ─────────────────────────────────────────────────────────────
+  // ── Utility ───────────────────────────────────────────────────────────────
 
   function _readAlpha(canvas) {
     const ctx  = canvas.getContext('2d');

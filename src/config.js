@@ -35,17 +35,12 @@
 
     // ── Draw tool — disk trail ───────────────────────────────────────────────
     // All sizes in *screen pixels* (constant regardless of zoom level).
-    DISK_RADIUS_MAX_PX: 12,  // radius at full-size peak of profile
-    DISK_RADIUS_MIN_PX:  4,  // radius at start / end of profile
+    // All disks are the same size now; the triangle/tentacle shape emerges
+    // naturally because the base of a stroke starts expanding earlier than the tip.
+    DISK_RADIUS_MAX_PX: 12,  // radius of every disk
 
     // Trail density: one disk emitted per this many screen-pixels of movement.
-    // Lower = denser trail (more disks), higher = sparser.
     TRAIL_DENSITY_PX: 0.6,
-
-    // ── Draw tool — time-driven size profile ─────────────────────────────────
-    // t = seconds since mouse-button pressed
-    PROFILE_GROW_TIME_S:  0.5,  // t ∈ [0, GROW]  → radius grows min→max
-    PROFILE_TAPER_TIME_S: 2.0,  // t ∈ [GROW, GROW+TAPER] → radius tapers max→min
 
     // ── Expansion ────────────────────────────────────────────────────────────
     // Initial frontier speed in *screen pixels per second*.
