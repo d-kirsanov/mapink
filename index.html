@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fun Map Editor</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <div id="app">
+    <!-- Main display canvas: all rendering happens here -->
+    <canvas id="mainCanvas"></canvas>
+
+    <!-- UI overlay: pointer-events disabled by default; re-enabled per child -->
+    <div id="uiOverlay">
+
+      <!-- ── Toolbar ─────────────────────────────────────────────────────── -->
+      <div id="toolbar">
+        <button id="btn-save"  title="Save map (SVG)">💾 Save</button>
+        <button id="btn-load"  title="Load map (SVG)">📂 Load</button>
+        <span class="sep"></span>
+        <button id="btn-undo"  title="Undo  (Ctrl+Z)" disabled>↩ Undo</button>
+        <button id="btn-redo"  title="Redo  (Ctrl+Y)" disabled>↪ Redo</button>
+        <span class="sep"></span>
+        <label  id="lbl-decay" title="Expansion decay rate">
+          Decay
+          <input id="inp-decay" type="range" min="0.2" max="4" step="0.1" value="1.5">
+        </label>
+        <span id="hint">Draw with left mouse · Erase with right · Middle to pan · Wheel to zoom · Home to fit</span>
+      </div>
+
+      <!-- ── Floating colour picker (shown on object double-click) ──────── -->
+      <div id="colorPickerPopup" class="popup" style="display:none">
+        <label>Object colour
+          <input id="colorPickerInput" type="color" value="#4a90d9">
+        </label>
+        <button id="colorPickerClose">✕</button>
+      </div>
+
+      <!-- ── In-canvas title editor (shown on title double-click) ─────── -->
+      <div id="titleEditWrap" style="display:none; position:absolute">
+        <input id="titleEditInput" type="text" spellcheck="false"
+               placeholder="Enter title…" autocomplete="off">
+      </div>
+
+      <!-- Hidden file input for load -->
+      <input id="fileInput" type="file" accept=".svg" style="display:none">
+
+    </div><!-- #uiOverlay -->
+  </div><!-- #app -->
+
+  <!-- ── Libraries (CDN; for offline copy lib/clipper.js locally) ──────── -->
+  <!--
+    Clipper.js handles polygon boolean operations (union / difference).
+    For fully offline use:
+      1. Download: https://cdnjs.cloudflare.com/ajax/libs/clipper-lib/6.4.2/clipper.js
+      2. Save as lib/clipper.js
+      3. Replace the CDN <script> below with: <script src="lib/clipper.js"></script>
+  -->
+  <script src="lib/clipper.js"></script>
+
+  <!-- ── App modules (order = dependency order — do not reorder) ────────── -->
+  <script src="world-map.js"></script>     <!-- embedded world SVG path data    -->
+  <script src="src/config.js"></script>     <!-- all constants                    -->
+  <script src="src/viewport.js"></script>   <!-- pan / zoom / coordinate transforms -->
+  <script src="src/colorUtils.js"></script> <!-- OKLab colour distance & selection -->
+  <script src="src/undoStack.js"></script>  <!-- undo / redo history              -->
+  <script src="src/worldmap.js"></script>   <!-- static path loading & rendering  -->
+  <script src="src/userObjects.js"></script><!-- UserObject / Shape data model    -->
+  <script src="src/rasterOps.js"></script>  <!-- off-screen canvas raster ops     -->
+  <script src="src/tracing.js"></script>    <!-- marching-squares raster→vector   -->
+  <script src="src/pathOps.js"></script>    <!-- Clipper.js boolean op wrapper    -->
+  <script src="src/drawTool.js"></script>   <!-- draw / erase tool                -->
+  <script src="src/expansion.js"></script>  <!-- animated expansion engine        -->
+  <script src="src/titleRenderer.js"></script><!-- title placement & editing      -->
+  <script src="src/renderer.js"></script>   <!-- main render loop                 -->
+  <script src="src/storage.js"></script>    <!-- SVG save / load                  -->
+  <script src="src/ui.js"></script>         <!-- toolbar, shortcuts, popups       -->
+  <script src="src/main.js"></script>       <!-- application init                 -->
+
+</body>
+</html>

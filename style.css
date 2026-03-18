@@ -1,0 +1,165 @@
+/* ── Reset ──────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #0d1b2a;
+  overflow: hidden;
+  font-family: system-ui, sans-serif;
+  color: #dde6f0;
+  user-select: none;        /* prevent text selection during drag */
+  -webkit-user-select: none;
+}
+
+/* ── App shell ──────────────────────────────────────────────────────────── */
+#app {
+  position: relative;
+  width:  100vw;
+  height: 100vh;
+}
+
+#mainCanvas {
+  display: block;
+  position: absolute;
+  inset: 0;
+  /* Cursor is set dynamically by ui.js based on active tool */
+  cursor: crosshair;
+  touch-action: none;   /* disable browser panning so we handle it ourselves */
+}
+
+#uiOverlay {
+  position: absolute;
+  inset: 0;
+  /* The overlay itself must NOT intercept mouse events;
+     only its interactive children do (set pointer-events: all on them). */
+  pointer-events: none;
+}
+
+/* ── Toolbar ────────────────────────────────────────────────────────────── */
+#toolbar {
+  pointer-events: all;
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(10, 20, 35, 0.85);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px;
+  padding: 6px 12px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  white-space: nowrap;
+  max-width: calc(100vw - 24px);
+}
+
+#toolbar button {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 5px;
+  color: #dde6f0;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 10px;
+  transition: background 0.15s;
+}
+#toolbar button:hover:not(:disabled) {
+  background: rgba(255,255,255,0.18);
+}
+#toolbar button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.sep {
+  width: 1px;
+  height: 20px;
+  background: rgba(255,255,255,0.18);
+  flex-shrink: 0;
+}
+
+#lbl-decay {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #aabbd0;
+}
+#inp-decay {
+  width: 80px;
+  cursor: pointer;
+  accent-color: #4a90d9;
+}
+
+#hint {
+  font-size: 11px;
+  color: #6a8099;
+  margin-left: 4px;
+}
+
+/* ── Popups ─────────────────────────────────────────────────────────────── */
+.popup {
+  pointer-events: all;
+  position: absolute;
+  background: rgba(10, 20, 35, 0.92);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+  font-size: 13px;
+}
+
+#colorPickerPopup {
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+#colorPickerInput {
+  width: 40px;
+  height: 28px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 2px;
+  background: transparent;
+}
+#colorPickerClose {
+  background: none;
+  border: none;
+  color: #aabbd0;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+}
+#colorPickerClose:hover { color: #fff; }
+
+/* ── In-canvas title editor ─────────────────────────────────────────────── */
+#titleEditWrap {
+  pointer-events: all;
+  z-index: 10;
+}
+#titleEditInput {
+  background: rgba(0,0,0,0.6);
+  border: 1.5px solid rgba(255,255,255,0.5);
+  border-radius: 4px;
+  color: #fff;
+  font-size: 16px;        /* overridden dynamically by titleRenderer */
+  font-family: "Palatino Linotype", Palatino, serif;
+  padding: 2px 6px;
+  outline: none;
+  min-width: 80px;
+  text-align: center;
+}
+#titleEditInput:focus {
+  border-color: #4a90d9;
+  box-shadow: 0 0 0 2px rgba(74,144,217,0.35);
+}
+
+/* ── Scrollbar hiding for the whole page ──────────────────────────────── */
+::-webkit-scrollbar { display: none; }
