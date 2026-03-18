@@ -97,6 +97,11 @@
     // ── Mouse-wheel zoom ──────────────────────────────────────────────────
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
+      // Finalize any running expansion BEFORE changing the viewport.
+      // Tracing must run under the same transform that was active during drawing.
+      if (MapEditor.Expansion && MapEditor.Expansion.isActive()) {
+        MapEditor.Expansion.stop();
+      }
       const delta  = e.deltaY > 0 ? -1 : 1;
       const factor = delta > 0 ? ZOOM_WHEEL_FACTOR : 1 / ZOOM_WHEEL_FACTOR;
       const rect   = canvas.getBoundingClientRect();

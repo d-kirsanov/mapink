@@ -156,12 +156,23 @@
   // ── Undo / redo helpers ───────────────────────────────────────────────────
 
   function _undo() {
+    // If expansion is running, cancel it (restore pre-draw state) without
+    // popping the undo stack — the gesture is discarded, not committed.
+    if (MapEditor.Expansion && MapEditor.Expansion.isActive()) {
+      MapEditor.Expansion.cancel();
+      UI.refreshUndoButtons();
+      return;
+    }
     const state = MapEditor.undoStack.undo();
     if (!state) return;
     MapEditor.UserObjects.applySnapshot(state);
   }
 
   function _redo() {
+    // Finalize any running expansion before jumping to a redo state.
+    if (MapEditor.Expansion && MapEditor.Expansion.isActive()) {
+      MapEditor.Expansion.stop();
+    }
     const state = MapEditor.undoStack.redo();
     if (!state) return;
     MapEditor.UserObjects.applySnapshot(state);

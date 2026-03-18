@@ -64,6 +64,11 @@
     // receding object B (no overlap).
     EXPANSION_ERASE_PENALTY: 1.3,
 
+    // When expanding into another user object's territory (add mode),
+    // the advance rate is multiplied by this factor.
+    // 1.0 = no resistance, 0.0 = hard stop.  Default ~half speed.
+    EXPANSION_RESISTANCE_FACTOR: 0.4,
+
     // ── Clipper.js integer scaling ────────────────────────────────────────────
     // World-space floats are multiplied by this before passing to Clipper.
     // 1000 gives sub-pixel precision at the world scale (0.001 world units).

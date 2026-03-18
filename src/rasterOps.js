@@ -133,6 +133,33 @@
   };
 
   /**
+   * Rasterise the FILLS of all static world paths as a white mask.
+   * Used by the expansion engine for sea-clipping: any pixel NOT covered
+   * by a static fill is considered ocean (outside land) and will be
+   * stripped from the trail before expansion if any disk center is on land.
+   *
+   * @param {MapEditor.Viewport} viewport
+   * @returns {HTMLCanvasElement}
+   */
+  RasterOps.renderStaticPathFillMask = function (viewport) {
+    const canvas = _makeCanvas();
+    if (!MapEditor.WorldMap || !MapEditor.WorldMap.isLoaded) return canvas;
+
+    const ctx = canvas.getContext('2d');
+    ctx.save();
+    viewport.applyToContext(ctx);
+    ctx.fillStyle = '#ffffff';
+
+    for (const sp of MapEditor.WorldMap.paths) {
+      if (!sp.path2D || sp.fill === 'none') continue;
+      ctx.fill(sp.path2D, 'nonzero');
+    }
+
+    ctx.restore();
+    return canvas;
+  };
+
+  /**
    * Rasterise the STROKES of all static world paths as a white mask.
    * This is the primary blocker for expansion: coastlines, river edges, etc.
    *

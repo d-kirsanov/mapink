@@ -104,8 +104,14 @@
   // ── Mouse event handlers ──────────────────────────────────────────────────
 
   function _onMouseDown(e) {
-    // Only left (0) or right (2) button; ignore middle (pan is handled in main.js).
+    // Only left (0) or right (2) button.
     if (e.button !== 0 && e.button !== 2) return;
+
+    // If expansion is running from a previous gesture, finalize it first
+    // so the new draw starts from a clean committed state.
+    if (MapEditor.Expansion && MapEditor.Expansion.isActive()) {
+      MapEditor.Expansion.stop();
+    }
 
     const { viewport } = MapEditor;
     const rect = MapEditor.canvas.getBoundingClientRect();
@@ -163,12 +169,12 @@
     }
 
     // ── Begin gesture ─────────────────────────────────────────────────────
+    // Snapshot the state RIGHT BEFORE this gesture for Expansion.cancel() recovery.
+    // NOT pushed to undoStack here — undoStack.push() happens in Expansion._finalize().
     _preDrawSnapshot = MapEditor.UserObjects.snapshot();
-    // If we just created a new empty object, we need to include the pre-creation
-    // state in the snapshot.  Re-snapshot after temporarily removing the new empty
-    // object so undo rolls back to before it existed.
     if (_targetIsNew) {
-      // Temporarily remove the freshly-created (empty) object from the snapshot.
+      // The newly-created (empty) object is not yet part of the meaningful state;
+      // strip it from the cancel-recovery snapshot.
       _preDrawSnapshot.userObjects = _preDrawSnapshot.userObjects.filter(
         o => o.id !== _targetObjId
       );
@@ -204,32 +210,29 @@
 
     const hasTrail = _diskTrail.length > 0;
     if (!hasTrail) {
-      // No disks emitted (user just clicked without moving).
-      // Clean up empty object created on mousedown, if any.
       if (_targetIsNew) MapEditor.UserObjects.remove(_targetObjId);
       _reset();
       return;
     }
 
-    // Push pre-draw state onto undo stack BEFORE applying changes.
-    MapEditor.undoStack.push(_preDrawSnapshot);
-    if (MapEditor.UI && MapEditor.UI.refreshUndoButtons) {
-      MapEditor.UI.refreshUndoButtons();
-    }
+    // Extract disk centers (screen coords) for sea-clipping in expansion.
+    const diskCenters = _diskTrail.map(d => ({ sx: d.sx, sy: d.sy }));
+
+    // Capture pre-draw snapshot reference before _reset() clears it.
+    const preSnap = _preDrawSnapshot;
 
     if (MapEditor.spaceHeld) {
-      // Space held: commit raw trail directly, no expansion.
+      // Space held → commit raw trail, no expansion.
+      // Push undo here since we bypass Expansion._finalize().
       _finalizeTrail();
       _reset();
     } else {
-      // Hand off to expansion engine.  _reset() is called here immediately
-      // because the expansion engine is now in charge; the draw state is no
-      // longer needed.  Expansion reads the trail canvas before this frame ends.
       const objId  = _targetObjId;
       const mode   = _mode;
       const isNew  = _targetIsNew;
       _reset();
-      MapEditor.Expansion.start(objId, mode, isNew);
+      // Expansion._finalize() will push to undoStack after applying polygons.
+      MapEditor.Expansion.start(objId, mode, isNew, diskCenters, preSnap);
     }
   }
 
@@ -315,27 +318,23 @@
   // ── Trail finalisation ────────────────────────────────────────────────────
 
   /**
-   * Trace the trail canvas, build world-space polygons, and apply the
-   * boolean operation (union or difference) to the target object.
-   *
-   * In Part 5 the expansion engine replaces this call so that the operation
-   * is animated and respects boundaries.  The expansion engine will call back
-   * into the same union/difference logic after the animation completes.
+   * Trace the trail canvas and apply immediately (Space-held: no expansion).
+   * Pushes undo AFTER applying, consistent with Expansion._finalize().
    */
   function _finalizeTrail() {
-    const viewport   = MapEditor.viewport;
-    const trailCanvas = MapEditor.RasterOps.getTrailCanvas();
-
-    // Trace the raster into world-space polygons.
-    const worldPolys = MapEditor.Tracing.traceCanvas(trailCanvas, viewport);
-
+    const worldPolys = MapEditor.Tracing.traceCanvas(
+      MapEditor.RasterOps.getTrailCanvas(), MapEditor.viewport
+    );
     if (!worldPolys || worldPolys.length === 0) {
-      // Trail was too small to trace — discard.
       if (_targetIsNew) MapEditor.UserObjects.remove(_targetObjId);
-      return;
+    } else {
+      _applyPolygonsToTarget(worldPolys, _targetObjId, _mode, _targetIsNew);
     }
-
-    _applyPolygonsToTarget(worldPolys, _targetObjId, _mode, _targetIsNew);
+    // Push undo after applying (mirrors Expansion._finalize behaviour).
+    MapEditor.undoStack.push(MapEditor.UserObjects.snapshot());
+    if (MapEditor.UI && MapEditor.UI.refreshUndoButtons) {
+      MapEditor.UI.refreshUndoButtons();
+    }
   }
 
   /**
