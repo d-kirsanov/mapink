@@ -107,7 +107,7 @@
     // Inside threshold (0–255 alpha).
     TRACE_ALPHA_THRESHOLD: 128,
     // Ramer-Douglas-Peucker simplification epsilon, in *world* units.
-    TRACE_RDP_EPSILON: 0.3,
+    TRACE_RDP_EPSILON: 0.01,
 
     // ── Debug ─────────────────────────────────────────────────────────────────
     DEBUG: false,

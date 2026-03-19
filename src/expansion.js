@@ -173,20 +173,19 @@
     const cx_i = Math.round(sx);
     const cy_i = Math.round(sy);
 
-    // ── Sea clipping ────────────────────────────────────────────────────
-    // If this center is on sea AND we already have land-based centers,
-    // skip this disk (land has priority).
+    // ── Track whether any disk center has landed on land ─────────────────
+    // We paint the disk unconditionally here; sea-clipping (zeroing pixels
+    // outside land fills) happens in _finalize() after all disks are known.
+    // This is the only correct approach because we can't know whether a sea
+    // disk comes before or after land disks until the stroke is finished.
     if (_landData) {
       const inBounds = cx_i >= 0 && cx_i < _W && cy_i >= 0 && cy_i < _H;
-      const onLand   = inBounds ? !!_landData[cy_i * _W + cx_i] : false;
-      if (onLand) {
+      if (inBounds && _landData[cy_i * _W + cx_i]) {
         _anyLandCenter = true;
-      } else if (_anyLandCenter) {
-        return;   // sea disk after land centers — skip
       }
     }
 
-    // ── Paint disk into _addedMask ──────────────────────────────────────
+    // ── Paint disk into _addedMask ────────────────────────────────────────
     const r  = Math.ceil(radius);
     const r2 = radius * radius;
     const newSeeds = [];
@@ -201,18 +200,15 @@
         const px = ny * _W + nx;
         if (_addedMask[px] || _blocked[px]) continue;
         _addedMask[px] = 1;
-        _boundary.delete(px);   // it's now inside, not a frontier pixel
+        _boundary.delete(px);
         newSeeds.push(px);
       }
     }
 
-    // ── Extend frontier from new seeds ──────────────────────────────────
     for (const px of newSeeds) {
       _forEachNeighbor8(px, (npx, df) => {
         if (_addedMask[npx] || _blocked[npx]) return;
-        if (!_boundary.has(npx) || _boundary.get(npx) > df) {
-          _boundary.set(npx, df);
-        }
+        if (!_boundary.has(npx) || _boundary.get(npx) > df) _boundary.set(npx, df);
       });
     }
 
@@ -316,10 +312,37 @@
 
     const n = _W * _H;
 
+    // ── Sea clipping (deferred from addSeeds) ─────────────────────────────
+    // If ANY disk center landed on land, remove all _addedMask pixels that
+    // lie outside static-path fills (i.e. in the ocean).  This correctly
+    // handles mixed strokes that cross a coastline: the land portion is kept,
+    // the sea portion is discarded, regardless of stroke direction or order.
+    if (_anyLandCenter && _landData) {
+      let removedAny = false;
+      for (let px = 0; px < n; px++) {
+        if (_addedMask[px] && !_landData[px]) {
+          _addedMask[px] = 0;
+          removedAny = true;
+        }
+      }
+      // Rebuild boundary after clipping (some frontier entries may now be invalid).
+      if (removedAny) {
+        const newBoundary = new Map();
+        for (const [px, df] of _boundary) {
+          if (!_addedMask[px] && !_blocked[px]) {
+            // Keep frontier pixel only if it still has an in-mask neighbour.
+            let hasInMaskNeighbour = false;
+            _forEachNeighbor8(px, (npx) => {
+              if (_addedMask[npx]) hasInMaskNeighbour = true;
+            });
+            if (hasInMaskNeighbour) newBoundary.set(px, df);
+          }
+        }
+        _boundary = newBoundary;
+      }
+    }
+
     // ── Erase rind fix: dilate _addedMask 3px within _baseMask ───────────
-    // Marching squares traces ~0.5–1px inside the raster boundary.
-    // 3px dilation ensures the Clipper difference eliminates the full edge,
-    // leaving no visible rind outline.
     if (_mode === 'erase') {
       const extra = new Uint8Array(n);
       for (let px = 0; px < n; px++) {
@@ -329,7 +352,7 @@
           const ny = y0 + dy;
           if (ny < 0 || ny >= _H) continue;
           for (let dx = -3; dx <= 3; dx++) {
-            if (dx * dx + dy * dy > 9) continue;   // 3px circle
+            if (dx * dx + dy * dy > 9) continue;
             const nx = x0 + dx;
             if (nx < 0 || nx >= _W) continue;
             const npx = ny * _W + nx;
@@ -340,7 +363,7 @@
       for (let px = 0; px < n; px++) if (extra[px]) _addedMask[px] = 1;
     }
 
-    // ── Build final canvas from _addedMask ────────────────────────────────
+    // ── Build final canvas ────────────────────────────────────────────────
     const finalCanvas = document.createElement('canvas');
     finalCanvas.width  = _W;
     finalCanvas.height = _H;
@@ -390,15 +413,33 @@
   /**
    * Add mode:   static strokes only (other objects NOT blocked — resistance instead).
    * Erase mode: static strokes + pixels outside target object.
+   *
+   * In BOTH modes, the 1-pixel canvas border is always blocked.
+   * This guarantees the expansion frontier never reaches the literal image
+   * edge, so marching-squares always produces closed polygon contours.
+   * Without this, a shape touching the screen edge produces an open contour
+   * that stitches into a half-screen-crossing gap.
    */
   function _buildBlockedMask(viewport) {
     const n       = _W * _H;
     const blocked = new Uint8Array(n);
 
+    // ── 1-pixel canvas border — always blocked ────────────────────────────
+    for (let x = 0; x < _W; x++) {
+      blocked[x] = 1;                      // top row
+      blocked[(_H - 1) * _W + x] = 1;     // bottom row
+    }
+    for (let y = 0; y < _H; y++) {
+      blocked[y * _W] = 1;                 // left col
+      blocked[y * _W + (_W - 1)] = 1;     // right col
+    }
+
+    // ── Static path strokes ───────────────────────────────────────────────
     const strokeCanvas = MapEditor.RasterOps.renderStaticPathStrokeMask(viewport);
     const strokeData   = _readAlpha(strokeCanvas);
     for (let px = 0; px < n; px++) if (strokeData[px]) blocked[px] = 1;
 
+    // ── Erase: also block pixels outside the target object ────────────────
     if (_mode === 'erase') {
       for (let px = 0; px < n; px++) if (!_baseMask[px]) blocked[px] = 1;
     }

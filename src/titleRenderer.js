@@ -79,7 +79,7 @@
 
   function _drawShapeTitle(ctx, viewport, obj, shape, W, H) {
     const { TITLE_MIN_FONT_PX, TITLE_MAX_FONT_PX, TITLE_PADDING_PX,
-            TITLE_FONT_FAMILY, TITLE_FONT_WEIGHT, TITLE_EXTERNAL_GAP_PX } = MapEditor.Config;
+            TITLE_FONT_FAMILY, TITLE_FONT_WEIGHT } = MapEditor.Config;
 
     // ── Visible bbox on screen ────────────────────────────────────────────
     const sb  = shape.bounds;
@@ -95,19 +95,13 @@
     const vw = vx1 - vx0;
     const vh = vy1 - vy0;
 
-    // ── Polygon-centroid title position ───────────────────────────────────
-    // Using the vertex centroid of the shape's clipper polygons (world space),
-    // projected to screen and clamped to the visible bbox.
-    // This is far more accurate than bbox-centre for irregular shapes,
-    // and prevents two neighbouring countries' titles from overlapping.
-    const wc  = _shapeWorldCentroid(shape);
-    let   cx, cy;
+    // ── Polygon-centroid title position, clamped to screen ─────────────────
+    const wc = _shapeWorldCentroid(shape);
+    let cx, cy;
     if (wc) {
       const sc = viewport.worldToScreen(wc.x, wc.y);
-      // Clamp to visible bbox with a little inset so the text stays inside.
-      const inset = TITLE_PADDING_PX;
-      cx = Math.max(vx0 + inset, Math.min(vx1 - inset, sc.x));
-      cy = Math.max(vy0 + inset, Math.min(vy1 - inset, sc.y));
+      cx = Math.max(vx0 + TITLE_PADDING_PX, Math.min(vx1 - TITLE_PADDING_PX, sc.x));
+      cy = Math.max(vy0 + TITLE_PADDING_PX, Math.min(vy1 - TITLE_PADDING_PX, sc.y));
     } else {
       cx = (vx0 + vx1) / 2;
       cy = (vy0 + vy1) / 2;
@@ -126,9 +120,16 @@
     const textW = _measureText(obj.title, fontSize, TITLE_FONT_WEIGHT, TITLE_FONT_FAMILY);
 
     if (fontSize <= TITLE_MIN_FONT_PX && textW > availW) {
-      _drawExternalTitle(ctx, obj, shape, viewport, vx1, cy, fontSize, W, H);
+      _drawExternalTitle(ctx, obj, shape, viewport, vx0, vx1, cy, fontSize, W, H);
       return;
     }
+
+    // ── Clamp text box fully inside screen ────────────────────────────────
+    // (prevents titles from being half-cut at screen edges when zoomed in)
+    const halfW = textW / 2 + TITLE_PADDING_PX;
+    const halfH = fontSize / 2 + 2;
+    cx = Math.max(halfW, Math.min(W - halfW, cx));
+    cy = Math.max(halfH, Math.min(H - halfH, cy));
 
     _renderTitle(ctx, obj.title, cx, cy, fontSize, obj.color,
                  TITLE_FONT_WEIGHT, TITLE_FONT_FAMILY);
@@ -138,27 +139,71 @@
     });
   }
 
-  function _drawExternalTitle(ctx, obj, shape, viewport, shapeRight, cy, fontSize, W, H) {
-    const { TITLE_EXTERNAL_GAP_PX, TITLE_FONT_WEIGHT, TITLE_FONT_FAMILY } = MapEditor.Config;
+  /**
+   * Draw the title outside the shape when it doesn't fit inside.
+   *
+   * Placement priority:
+   *   1. Right of shape  — if that column is free of other user objects (or is sea)
+   *   2. Left  of shape  — if that column is free of other user objects (or is sea)
+   *   3. Right of shape  — fallback regardless
+   */
+  function _drawExternalTitle(ctx, obj, shape, viewport, shapeLeft, shapeRight, cy,
+                               fontSize, W, H) {
+    const { TITLE_EXTERNAL_GAP_PX, TITLE_FONT_WEIGHT, TITLE_FONT_FAMILY,
+            TITLE_PADDING_PX } = MapEditor.Config;
 
     const textW = _measureText(obj.title, fontSize, TITLE_FONT_WEIGHT, TITLE_FONT_FAMILY);
-    const x     = shapeRight + TITLE_EXTERNAL_GAP_PX;
-    if (x + textW > W) return;
+    const halfH = fontSize / 2 + 2;
 
-    const col   = Math.round(x / 10) * 10;
+    // Clamp vertical position so label doesn't go off-screen.
+    const drawY = Math.max(halfH, Math.min(H - halfH, cy));
+
+    // ── Candidate positions ───────────────────────────────────────────────
+    const rightX = shapeRight + TITLE_EXTERNAL_GAP_PX;
+    const leftX  = shapeLeft  - TITLE_EXTERNAL_GAP_PX - textW;
+
+    const rightFits = (rightX + textW) <= W;
+    const leftFits  = leftX >= 0;
+
+    // Check if a horizontal band around (x, drawY) overlaps another object.
+    // We test the screen midpoint of the label band at several y offsets.
+    const _columnHasObject = (startX, bandW) => {
+      const testY  = Math.max(0, Math.min(H - 1, drawY));
+      const midX   = Math.max(0, Math.min(W - 1, startX + bandW / 2));
+      const wp     = viewport.screenToWorld(midX, testY);
+      const hit    = MapEditor.UserObjects.hitTest(wp.x, wp.y);
+      return hit && hit.object.id !== obj.id;
+    };
+
+    let chosenX = null;
+
+    if (rightFits && !_columnHasObject(rightX, textW)) {
+      chosenX = rightX;                          // 1. right is clear
+    } else if (leftFits && !_columnHasObject(leftX, textW)) {
+      chosenX = leftX;                           // 2. left is clear
+    } else if (rightFits) {
+      chosenX = rightX;                          // 3. fallback: right anyway
+    } else if (leftFits) {
+      chosenX = leftX;
+    } else {
+      return;   // nowhere to put it
+    }
+
+    // Column occupancy to avoid vertical pile-up of same-side labels.
+    const col   = Math.round(chosenX / 10) * 10;
     const lastY = _externalCols.get(col) || 0;
     const lineH = fontSize * 1.4;
-    let   drawY = cy;
-    if (Math.abs(drawY - lastY) < lineH) drawY = lastY + lineH;
-    if (drawY < 0 || drawY > H) return;
+    let   labelY = drawY;
+    if (Math.abs(labelY - lastY) < lineH) labelY = lastY + lineH;
+    if (labelY < halfH || labelY > H - halfH) return;
+    _externalCols.set(col, labelY);
 
-    _externalCols.set(col, drawY);
-    const tcx = x + textW / 2;
-    _renderTitle(ctx, obj.title, tcx, drawY, fontSize, obj.color,
+    const tcx = chosenX + textW / 2;
+    _renderTitle(ctx, obj.title, tcx, labelY, fontSize, obj.color,
                  TITLE_FONT_WEIGHT, TITLE_FONT_FAMILY);
     _titleHitAreas.push({
-      rect: { x, y: drawY - fontSize / 2, w: textW, h: fontSize },
-      cx: tcx, cy: drawY, fontSize, obj,
+      rect: { x: chosenX, y: labelY - fontSize / 2, w: textW, h: fontSize },
+      cx: tcx, cy: labelY, fontSize, obj,
     });
   }
 
