@@ -173,19 +173,21 @@
     const cx_i = Math.round(sx);
     const cy_i = Math.round(sy);
 
-    // ── Track whether any disk center has landed on land ─────────────────
-    // We paint the disk unconditionally here; sea-clipping (zeroing pixels
-    // outside land fills) happens in _finalize() after all disks are known.
-    // This is the only correct approach because we can't know whether a sea
-    // disk comes before or after land disks until the stroke is finished.
+    // ── Track land centers; retroactively clip if we just got the first one ─
     if (_landData) {
       const inBounds = cx_i >= 0 && cx_i < _W && cy_i >= 0 && cy_i < _H;
-      if (inBounds && _landData[cy_i * _W + cx_i]) {
+      const onLand   = inBounds && !!_landData[cy_i * _W + cx_i];
+      if (onLand && !_anyLandCenter) {
+        _anyLandCenter = true;
+        // We now know land has priority.  Remove sea pixels already in the mask.
+        _retroactiveSeaClip();
+      } else if (onLand) {
         _anyLandCenter = true;
       }
     }
 
-    // ── Paint disk into _addedMask ────────────────────────────────────────
+    // ── Paint disk — skip sea pixels if land-mode is active ──────────────
+    const doSeaClip = _anyLandCenter && _landData;
     const r  = Math.ceil(radius);
     const r2 = radius * radius;
     const newSeeds = [];
@@ -199,6 +201,7 @@
         if (nx < 0 || nx >= _W) continue;
         const px = ny * _W + nx;
         if (_addedMask[px] || _blocked[px]) continue;
+        if (doSeaClip && !_landData[px]) continue;   // skip sea pixels
         _addedMask[px] = 1;
         _boundary.delete(px);
         newSeeds.push(px);
@@ -208,6 +211,7 @@
     for (const px of newSeeds) {
       _forEachNeighbor8(px, (npx, df) => {
         if (_addedMask[npx] || _blocked[npx]) return;
+        if (doSeaClip && !_landData[npx]) return;   // don't enqueue sea frontier
         if (!_boundary.has(npx) || _boundary.get(npx) > df) _boundary.set(npx, df);
       });
     }
@@ -276,10 +280,12 @@
 
     const advance    = speed * dt;
     const resistance = MapEditor.Config.EXPANSION_RESISTANCE_FACTOR;
+    const doSeaClip  = _anyLandCenter && _landData;
     const newPixels  = [];
 
     for (const [px, distFactor] of _boundary) {
       if (_addedMask[px] || _blocked[px]) continue;
+      if (doSeaClip && !_landData[px]) continue;   // sea pixel — never expand here
 
       const res   = (_mode === 'add' && _otherObjMask && _otherObjMask[px]) ? resistance : 1.0;
       const noise = _pixelNoise(px);
@@ -296,6 +302,7 @@
       _boundary.delete(px);
       _forEachNeighbor8(px, (npx, df) => {
         if (_addedMask[npx] || _blocked[npx]) return;
+        if (doSeaClip && _landData && !_landData[npx]) return;
         if (!_boundary.has(npx) || _boundary.get(npx) > df) _boundary.set(npx, df);
       });
     }
@@ -406,6 +413,54 @@
     _anyLandCenter   = false;
     if (_overlayCtx) _overlayCtx.clearRect(0, 0, _W, _H);
     _overlayImgData = null;
+  }
+
+  // ── Sea clipping helpers ──────────────────────────────────────────────────
+
+  /**
+   * Called the moment _anyLandCenter first becomes true.
+   * Removes all sea pixels already in _addedMask, clears them from the overlay,
+   * and rebuilds the boundary map so the frontier is fully land-only.
+   */
+  function _retroactiveSeaClip() {
+    if (!_landData) return;
+
+    const d        = _overlayImgData ? _overlayImgData.data : null;
+    let   anyClean = false;
+
+    for (let px = 0; px < _W * _H; px++) {
+      if (_addedMask[px] && !_landData[px]) {
+        _addedMask[px] = 0;
+        if (d) { const i = px * 4; d[i+3] = 0; }   // clear overlay alpha
+        anyClean = true;
+      }
+    }
+
+    if (anyClean) {
+      if (_overlayImgData) _overlayCtx.putImageData(_overlayImgData, 0, 0);
+      _rebuildBoundary();
+    }
+  }
+
+  /**
+   * Rebuild the entire _boundary map from scratch based on current _addedMask.
+   * Called after retroactive sea clipping removes pixels from the mask.
+   */
+  function _rebuildBoundary() {
+    const doSeaClip = _anyLandCenter && _landData;
+    const newBoundary = new Map();
+
+    for (let px = 0; px < _W * _H; px++) {
+      if (!_addedMask[px]) continue;
+      _forEachNeighbor8(px, (npx, df) => {
+        if (_addedMask[npx] || _blocked[npx]) return;
+        if (doSeaClip && _landData && !_landData[npx]) return;
+        if (!newBoundary.has(npx) || newBoundary.get(npx) > df) {
+          newBoundary.set(npx, df);
+        }
+      });
+    }
+    _boundary = newBoundary;
   }
 
   // ── Blocked mask ──────────────────────────────────────────────────────────

@@ -28,8 +28,10 @@
   const _measureCtx    = _measureCanvas.getContext('2d');
 
   let _externalCols  = new Map();
-  let _titleHitAreas = [];         // Array<{rect,cx,cy,fontSize,obj}> — reset per frame
-  let _editingObjId  = null;       // id of object whose title is currently being edited
+  let _titleHitAreas = [];
+  let _editingObjId  = null;
+  // Bounding boxes of all titles placed this frame — for overlap prevention.
+  let _placedRects   = [];   // Array<{x,y,w,h}>
 
   // ── Init ──────────────────────────────────────────────────────────────────
 
@@ -46,13 +48,19 @@
   TitleRenderer.drawTitles = function (ctx, viewport) {
     _externalCols.clear();
     _titleHitAreas = [];
+    _placedRects   = [];
 
     const W = MapEditor.canvas.width;
     const H = MapEditor.canvas.height;
 
-    for (const obj of MapEditor.UserObjects.getAll()) {
+    // Process largest objects first — they have highest label priority.
+    const objs = MapEditor.UserObjects.getAll().slice().sort((a, b) =>
+      _objectArea(b) - _objectArea(a)
+    );
+
+    for (const obj of objs) {
       if (!obj.title) continue;
-      if (obj.id === _editingObjId) continue;   // suppress while editing in-place
+      if (obj.id === _editingObjId) continue;
 
       for (const shape of obj.shapes) {
         if (!shape.bounds || shape.bounds.w === 0) continue;
@@ -79,7 +87,7 @@
 
   function _drawShapeTitle(ctx, viewport, obj, shape, W, H) {
     const { TITLE_MIN_FONT_PX, TITLE_MAX_FONT_PX, TITLE_PADDING_PX,
-            TITLE_FONT_FAMILY, TITLE_FONT_WEIGHT } = MapEditor.Config;
+            TITLE_FONT_FAMILY, TITLE_FONT_WEIGHT, TITLE_MIN_GAP_PX } = MapEditor.Config;
 
     // ── Visible bbox on screen ────────────────────────────────────────────
     const sb  = shape.bounds;
@@ -91,6 +99,12 @@
     const vy1 = Math.min(H, s1.y);
 
     if (vx1 <= vx0 || vy1 <= vy0) return;
+
+    // ── Vertex visibility check ───────────────────────────────────────────
+    // A C-shaped country has a bbox that may overlap the viewport even when
+    // all its polygon vertices are off-screen (viewport is inside the hollow).
+    // We skip the title unless at least one vertex actually projects on-screen.
+    if (!_shapeHasVertexOnScreen(shape, viewport, W, H)) return;
 
     const vw = vx1 - vx0;
     const vh = vy1 - vy0;
@@ -125,18 +139,18 @@
     }
 
     // ── Clamp text box fully inside screen ────────────────────────────────
-    // (prevents titles from being half-cut at screen edges when zoomed in)
     const halfW = textW / 2 + TITLE_PADDING_PX;
     const halfH = fontSize / 2 + 2;
     cx = Math.max(halfW, Math.min(W - halfW, cx));
     cy = Math.max(halfH, Math.min(H - halfH, cy));
 
+    const candidate = { x: cx - textW / 2, y: cy - fontSize / 2, w: textW, h: fontSize };
+    if (_overlapsAny(candidate, TITLE_MIN_GAP_PX)) return;
+
     _renderTitle(ctx, obj.title, cx, cy, fontSize, obj.color,
                  TITLE_FONT_WEIGHT, TITLE_FONT_FAMILY);
-    _titleHitAreas.push({
-      rect: { x: cx - textW / 2, y: cy - fontSize / 2, w: textW, h: fontSize },
-      cx, cy, fontSize, obj,
-    });
+    _placedRects.push(candidate);
+    _titleHitAreas.push({ rect: candidate, cx, cy, fontSize, obj });
   }
 
   /**
@@ -199,10 +213,14 @@
     _externalCols.set(col, labelY);
 
     const tcx = chosenX + textW / 2;
+    const candidate = { x: chosenX, y: labelY - fontSize / 2, w: textW, h: fontSize };
+    if (_overlapsAny(candidate, MapEditor.Config.TITLE_MIN_GAP_PX)) return;
+
     _renderTitle(ctx, obj.title, tcx, labelY, fontSize, obj.color,
                  TITLE_FONT_WEIGHT, TITLE_FONT_FAMILY);
+    _placedRects.push(candidate);
     _titleHitAreas.push({
-      rect: { x: chosenX, y: labelY - fontSize / 2, w: textW, h: fontSize },
+      rect: candidate,
       cx: tcx, cy: labelY, fontSize, obj,
     });
   }
@@ -327,6 +345,49 @@
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
+
+  /**
+   * Return true if at least one polygon vertex of the shape projects
+   * onto the visible screen rectangle.
+   *
+   * This correctly handles C-shaped or concave countries whose bounding box
+   * overlaps the viewport even though none of the polygon's filled area is
+   * actually visible (e.g. viewport is inside the hollow of the C).
+   *
+   * Performance: we short-circuit on the first hit, so the cost is O(1)
+   * in the happy case and O(vertices) in the worst case.
+   */
+  function _shapeHasVertexOnScreen(shape, viewport, W, H) {
+    const scale = MapEditor.Config.CLIPPER_SCALE;
+    for (const poly of (shape.clipperPolygons || [])) {
+      for (const pt of poly) {
+        const s = viewport.worldToScreen(pt.X / scale, pt.Y / scale);
+        if (s.x >= 0 && s.x <= W && s.y >= 0 && s.y <= H) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Return true if `rect` overlaps any already-placed rect by more than `gap` px.
+   * @param {{x,y,w,h}} rect
+   * @param {number}     gap   minimum spacing between rects
+   */
+  function _overlapsAny(rect, gap) {
+    const x1 = rect.x - gap, y1 = rect.y - gap;
+    const x2 = rect.x + rect.w + gap, y2 = rect.y + rect.h + gap;
+    for (const r of _placedRects) {
+      if (x1 < r.x + r.w && x2 > r.x && y1 < r.y + r.h && y2 > r.y) return true;
+    }
+    return false;
+  }
+
+  /** Sum of bounding-box areas of all shapes in an object (used for sort priority). */
+  function _objectArea(obj) {
+    let a = 0;
+    for (const s of obj.shapes) { if (s.bounds) a += s.bounds.w * s.bounds.h; }
+    return a;
+  }
 
   /**
    * Vertex centroid of the shape's clipper polygons in world space.

@@ -77,11 +77,13 @@
     TITLE_FONT_FAMILY: '"Palatino Linotype", Palatino, "Book Antiqua", serif',
     TITLE_FONT_WEIGHT: '600',
     TITLE_MAX_FONT_PX: 52,
-    TITLE_MIN_FONT_PX:  8,
-    TITLE_PADDING_PX:   6,   // breathing room between text box and object edge
+    TITLE_MIN_FONT_PX:  6,
+    TITLE_PADDING_PX:   12,   // breathing room between text box and object edge
     // When title cannot fit inside the object, it is placed to the right.
     // This is the gap between the object edge and the external title.
-    TITLE_EXTERNAL_GAP_PX: 4,
+    TITLE_EXTERNAL_GAP_PX: 8,
+    // Minimum gap (screen px) between any two rendered title bounding boxes.
+    TITLE_MIN_GAP_PX: 7,
 
     // ── Colors ───────────────────────────────────────────────────────────────
     OCEAN_COLOR:       '#1a4a7a',
@@ -106,8 +108,10 @@
     // ── Marching-squares tracing ──────────────────────────────────────────────
     // Inside threshold (0–255 alpha).
     TRACE_ALPHA_THRESHOLD: 128,
-    // Ramer-Douglas-Peucker simplification epsilon, in *world* units.
-    TRACE_RDP_EPSILON: 0.01,
+    // Ramer-Douglas-Peucker simplification tolerance in SCREEN PIXELS.
+    // Converted to world units at trace time via: worldEps = PX / viewport.zoom
+    // Higher zoom → smaller world epsilon → more detail preserved.
+    TRACE_RDP_EPSILON_PX: 1.5,
 
     // ── Debug ─────────────────────────────────────────────────────────────────
     DEBUG: false,

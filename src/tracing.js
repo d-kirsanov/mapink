@@ -108,20 +108,23 @@
     if (screenPolys.length === 0) return [];
 
     // Simplify and convert to world space.
-    const { TRACE_RDP_EPSILON } = MapEditor.Config;
     const worldPolys = [];
     for (const poly of screenPolys) {
       if (poly.length < 3) continue;
 
-      // RDP simplification in screen space first (epsilon = 1.2 px).
+      // RDP in screen space first (coarse pass, 1.2 px).
       const simplified = rdpSimplify(poly, 1.2);
       if (simplified.length < 3) continue;
 
       // Convert screen → world.
       const worldPoly = simplified.map(p => viewport.screenToWorld(p.x, p.y));
 
-      // RDP again in world space at the configured epsilon.
-      const worldSimp = rdpSimplify(worldPoly, TRACE_RDP_EPSILON);
+      // RDP in world space at screen-space epsilon converted to world units.
+      // Dividing by zoom means: at high zoom we keep more detail; at low zoom
+      // we simplify more aggressively.  This is the correct behaviour for a
+      // map editor: zoomed-in drawing preserves fine detail.
+      const worldEps  = MapEditor.Config.TRACE_RDP_EPSILON_PX / viewport.zoom;
+      const worldSimp = rdpSimplify(worldPoly, worldEps);
       if (worldSimp.length >= 3) worldPolys.push(worldSimp);
     }
 
