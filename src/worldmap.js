@@ -55,8 +55,7 @@
    * @param {string} [url='world-data.svg']
    * @returns {Promise<void>}
    */
-
-WorldMap.load = async function () {
+  WorldMap.load = async function () {
     try {
         if (typeof worldSvgString === 'undefined') {
             throw new Error("SVG string not found");
@@ -124,9 +123,37 @@ WorldMap.load = async function () {
       return;
     }
 
-
     WorldMap.isLoaded = true;
     MapEditor.debug(`WorldMap: loaded ${WorldMap.paths.length} static paths from ${url}`);
+  };
+
+  // ── Type-filtered path accessors ────────────────────────────────────────
+  //
+  // SVG layer conventions (the user sets these up in their SVG):
+  //
+  //   COASTLINES / LAND BORDERS  (type = 'land')
+  //     Closed filled paths.  fill = land colour, stroke = border colour.
+  //     Example id/class: "land", "coastline", "country-border"
+  //     Behaviour: hard expansion stop; sea-clipping uses their fills.
+  //
+  //   RIVERS  (type = 'river')
+  //     Open or closed stroke-only paths (fill = 'none').
+  //     Example id/class: "river", "stream", "lake"
+  //     Behaviour: hard expansion stop (narrow strip = RIVER_STROKE_BLOCK_PX).
+  //     Drawing across a river places seeds on BOTH banks; each expands
+  //     independently up to the river — no code needed for "both-bank" mode.
+  //     Rivers do NOT trigger sea-clipping (both banks are land).
+  //
+  //   MOUNTAINS  (type = 'mountain')
+  //     Closed filled contour polygons, one per elevation level.
+  //     Nested contours accumulate resistance: pixels inside N contours get
+  //     speed × MOUNTAIN_FACTOR_PER_LEVEL^N.  Mountain passes (areas covered
+  //     by fewer contours) naturally have lower resistance.
+  //     Example id/class: "mountain", "peak", "highland", "range"
+  //     Behaviour: NO hard stop; expansion slows multiplicatively per level.
+
+  WorldMap.pathsOfType = function (type) {
+    return WorldMap.paths.filter(p => p.type === type);
   };
 
   // ── Hit-testing ─────────────────────────────────────────────────────────

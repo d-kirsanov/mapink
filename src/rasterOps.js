@@ -135,8 +135,10 @@
   /**
    * Rasterise the FILLS of all static world paths as a white mask.
    * Used by the expansion engine for sea-clipping: any pixel NOT covered
-   * by a static fill is considered ocean (outside land) and will be
-   * stripped from the trail before expansion if any disk center is on land.
+   * by a static fill is considered ocean.
+   *
+   * Mountain fills are included (mountains are on land), so the land mask
+   * correctly covers mountain areas.
    *
    * @param {MapEditor.Viewport} viewport
    * @returns {HTMLCanvasElement}
@@ -160,14 +162,14 @@
   };
 
   /**
-   * Rasterise the STROKES of all static world paths as a white mask.
-   * This is the primary blocker for expansion: coastlines, river edges, etc.
+   * Rasterise blocker strokes for coastlines and rivers.
    *
-   * We render strokes at 4 screen-pixels wide (slightly thicker than the
-   * visual 1.5px stroke) to ensure no gaps in the barrier at any zoom level.
+   * Mountains are intentionally excluded — they slow expansion rather than
+   * stopping it (handled by the resistance map).
    *
-   * Fills are intentionally NOT rendered here — countries are painted over
-   * land fills freely; only the stroke boundary (coast/river edge) stops them.
+   * Coastlines use COAST_STROKE_BLOCK_PX (wider barrier = reliable stop).
+   * Rivers use RIVER_STROKE_BLOCK_PX (narrower = a brush spanning both banks
+   * still places seeds on each side, so expansion works on both independently).
    *
    * @param {MapEditor.Viewport} viewport
    * @returns {HTMLCanvasElement}
@@ -176,23 +178,79 @@
     const canvas = _makeCanvas();
     if (!MapEditor.WorldMap || !MapEditor.WorldMap.isLoaded) return canvas;
 
+    const { COAST_STROKE_BLOCK_PX, RIVER_STROKE_BLOCK_PX } = MapEditor.Config;
     const ctx = canvas.getContext('2d');
     ctx.save();
     viewport.applyToContext(ctx);
     ctx.strokeStyle = '#ffffff';
-    // 4px screen-space width: thick enough to form a continuous barrier,
-    // thinner than anything that would block meaningful painting.
-    ctx.lineWidth   = viewport.screenPxToWorld(4);
     ctx.lineCap     = 'round';
     ctx.lineJoin    = 'round';
 
     for (const sp of MapEditor.WorldMap.paths) {
-      if (!sp.path2D || sp.stroke === 'none') continue;
+      if (!sp.path2D) continue;
+      if (sp.type === 'mountain') continue;   // mountains: resistance not block
+
+      // Determine blocker width for this path type.
+      const blockPx = sp.type === 'river' ? RIVER_STROKE_BLOCK_PX : COAST_STROKE_BLOCK_PX;
+
+      // Only stroke paths that have a visible stroke OR are land/river boundaries.
+      // We block land fills too (coastline = edge of filled land polygon), so
+      // we mask paths that have either a stroke or a non-none fill.
+      if (sp.stroke === 'none' && sp.fill === 'none') continue;
+
+      ctx.lineWidth = viewport.screenPxToWorld(blockPx);
       ctx.stroke(sp.path2D);
     }
 
     ctx.restore();
     return canvas;
+  };
+
+  /**
+   * Build a Float32Array resistance map for mountain contours.
+   *
+   * Each pixel's value = number of mountain contour polygons that cover it.
+   * The expansion engine uses: advance × MOUNTAIN_FACTOR_PER_LEVEL ^ value
+   *
+   * Nested contours (higher elevation peaks) automatically accumulate higher
+   * values because they are covered by all outer contours plus their own.
+   * Mountain passes have fewer overlapping contours → lower value → faster.
+   *
+   * Returns null if no mountain paths are defined (avoids per-frame overhead).
+   *
+   * @param {MapEditor.Viewport} viewport
+   * @returns {Float32Array|null}
+   */
+  RasterOps.renderMountainResistanceMap = function (viewport) {
+    if (!MapEditor.WorldMap || !MapEditor.WorldMap.isLoaded) return null;
+
+    const mountainPaths = MapEditor.WorldMap.pathsOfType('mountain');
+    if (mountainPaths.length === 0) return null;
+
+    const n   = _w * _h;
+    const map = new Float32Array(n);
+    const thr = MapEditor.Config.TRACE_ALPHA_THRESHOLD;
+
+    for (const sp of mountainPaths) {
+      if (!sp.path2D) continue;
+
+      const tmpCanvas = _makeCanvas();
+      const ctx = tmpCanvas.getContext('2d');
+      ctx.save();
+      viewport.applyToContext(ctx);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill(sp.path2D, 'nonzero');
+      ctx.restore();
+
+      const alpha = ctx.getImageData(0, 0, _w, _h).data;
+      for (let i = 0; i < n; i++) {
+        if (alpha[i * 4 + 3] > thr) map[i] += 1;
+      }
+    }
+
+    // Return null if no mountain pixels were found (avoids overhead later).
+    for (let i = 0; i < n; i++) { if (map[i] > 0) return map; }
+    return null;
   };
 
   // ── Accessors ─────────────────────────────────────────────────────────

@@ -147,7 +147,7 @@
     MapEditor.Renderer.start();
 
     // Load the world SVG (async; render loop shows ocean + empty canvas until done).
-    await MapEditor.WorldMap.load('world-data.svg');
+    await MapEditor.WorldMap.load();
 
     // Fit the world to the screen once loaded.
     MapEditor.viewport.fitToScreen();

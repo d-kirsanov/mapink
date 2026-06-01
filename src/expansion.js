@@ -60,6 +60,7 @@
   let _baseMask;        // Uint8Array
   let _blocked;         // Uint8Array
   let _otherObjMask;    // Uint8Array | null
+  let _resistanceMap;   // Float32Array | null  — mountain contour level counts
   let _accum;           // Float32Array
   let _boundary;        // Map<int, float>
   let _landData;        // Uint8Array | null  (land-fill mask for sea clipping)
@@ -130,6 +131,9 @@
 
     // Resistance mask (other objects).
     _otherObjMask = _buildOtherObjMask(targetObjId, viewport);
+
+    // Mountain resistance map (Float32Array: count of contour layers per pixel).
+    _resistanceMap = MapEditor.RasterOps.renderMountainResistanceMap(viewport);
 
     // Blocked mask.
     _blocked = _buildBlockedMask(viewport);
@@ -280,17 +284,32 @@
 
     const advance    = speed * dt;
     const resistance = MapEditor.Config.EXPANSION_RESISTANCE_FACTOR;
+    const mountainK  = MapEditor.Config.MOUNTAIN_FACTOR_PER_LEVEL;
     const doSeaClip  = _anyLandCenter && _landData;
     const newPixels  = [];
 
     for (const [px, distFactor] of _boundary) {
       if (_addedMask[px] || _blocked[px]) continue;
-      if (doSeaClip && !_landData[px]) continue;   // sea pixel — never expand here
+      if (doSeaClip && !_landData[px]) continue;
 
-      const res   = (_mode === 'add' && _otherObjMask && _otherObjMask[px]) ? resistance : 1.0;
+      // ── Resistance factors ───────────────────────────────────────────────
+      // Other-object territory: multiplies speed by EXPANSION_RESISTANCE_FACTOR.
+      const objFactor = (_mode === 'add' && _otherObjMask && _otherObjMask[px])
+        ? resistance : 1.0;
+
+      // Mountain contours: each layer the pixel sits inside multiplies speed
+      // by MOUNTAIN_FACTOR_PER_LEVEL (e.g. 0.55).  Nested contours compound:
+      //   1 layer → ×0.55, 2 layers → ×0.30, 3 layers → ×0.17 …
+      // Passes between peaks have fewer layers → faster flow → natural routing.
+      const mountainLevels = _resistanceMap ? _resistanceMap[px] : 0;
+      const mountainFactor = mountainLevels > 0
+        ? Math.pow(mountainK, mountainLevels)
+        : 1.0;
+
       const noise = _pixelNoise(px);
 
-      _accum[px] += (advance * res * noise) / distFactor;
+      // Combine: diagonal pixels (distFactor = √2) accumulate slower → circular frontier.
+      _accum[px] += (advance * objFactor * mountainFactor * noise) / distFactor;
 
       if (_accum[px] >= 1.0) {
         _addedMask[px] = 1;
@@ -407,7 +426,7 @@
   }
 
   function _cleanup() {
-    _addedMask = _baseMask = _blocked = _otherObjMask = _accum = _landData = null;
+    _addedMask = _baseMask = _blocked = _otherObjMask = _resistanceMap = _accum = _landData = null;
     _boundary  = new Map();
     _preDrawSnapshot = null;
     _anyLandCenter   = false;

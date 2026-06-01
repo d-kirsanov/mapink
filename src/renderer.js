@@ -90,7 +90,22 @@
 
     // ── 3. Static fills ─────────────────────────────────────────────────
     if (MapEditor.WorldMap && MapEditor.WorldMap.isLoaded) {
-      MapEditor.WorldMap.drawFills(ctx);
+      // Land fills: draw as-is from SVG colour.
+      for (const sp of MapEditor.WorldMap.paths) {
+        if (sp.fill === 'none' || sp.type === 'mountain') continue;
+        ctx.fillStyle = sp.fill;
+        ctx.fill(sp.path2D);
+      }
+
+      // Mountain fills: drawn with their SVG fill colour and a subtle
+      // multiply-style darkening using 'source-atop' so elevation contours
+      // appear as shaded relief on top of the base land colour.
+      // (User supplies the actual palette in world-data.svg — we just draw them.)
+      for (const sp of MapEditor.WorldMap.pathsOfType('mountain')) {
+        if (sp.fill === 'none') continue;
+        ctx.fillStyle = sp.fill;
+        ctx.fill(sp.path2D);
+      }
     }
 
     // ── 4. User object fills ─────────────────────────────────────────────
@@ -98,7 +113,26 @@
 
     // ── 5. Static strokes ────────────────────────────────────────────────
     if (MapEditor.WorldMap && MapEditor.WorldMap.isLoaded) {
-      MapEditor.WorldMap.drawStrokes(ctx, viewport);
+      const { STATIC_STROKE_WIDTH_PX } = MapEditor.Config;
+      ctx.lineWidth = viewport.screenPxToWorld(STATIC_STROKE_WIDTH_PX);
+      ctx.lineCap   = 'round';
+      ctx.lineJoin  = 'round';
+
+      // Land / border strokes at their SVG colour.
+      for (const sp of MapEditor.WorldMap.paths) {
+        if (sp.stroke === 'none' || sp.type === 'mountain') continue;
+        ctx.strokeStyle = sp.stroke;
+        ctx.stroke(sp.path2D);
+      }
+
+      // Mountain contour strokes (if any) at reduced opacity.
+      ctx.globalAlpha = 0.55;
+      for (const sp of MapEditor.WorldMap.pathsOfType('mountain')) {
+        if (sp.stroke === 'none') continue;
+        ctx.strokeStyle = sp.stroke;
+        ctx.stroke(sp.path2D);
+      }
+      ctx.globalAlpha = 1;
     }
 
     // ── 6. User object borders ───────────────────────────────────────────

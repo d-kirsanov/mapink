@@ -54,15 +54,26 @@
     // Expansion stops when speed falls below this threshold (screen px/s).
     EXPANSION_STOP_THRESHOLD_PX: 0.5,
 
-    // Erase operations decay this much *faster* than add operations,
-    // guaranteeing that encroaching object A is always slightly ahead of
-    // receding object B (no overlap).
+    // Erase operations decay this much *faster* than add operations.
     EXPANSION_ERASE_PENALTY: 1.3,
 
-    // When expanding into another user object's territory (add mode),
-    // the advance rate is multiplied by this factor.
-    // 1.0 = no resistance, 0.0 = hard stop.  Default ~half speed.
+    // Fraction of normal expansion speed when crossing into another user object.
     EXPANSION_RESISTANCE_FACTOR: 0.4,
+
+    // ── Mountain resistance ───────────────────────────────────────────────────
+    // Each mountain contour layer the frontier is inside multiplies the advance
+    // rate by this factor.  0.55^1 ≈ 55%, 0.55^2 ≈ 30%, 0.55^3 ≈ 17% …
+    // Tune upward (toward 1.0) to make mountains more permeable.
+    MOUNTAIN_FACTOR_PER_LEVEL: 0.55,
+
+    // ── River blocking ────────────────────────────────────────────────────────
+    // Width (screen pixels) of the blocker strip painted over river strokes.
+    // Keep this LESS than DISK_RADIUS_MAX_PX * 2 so a brush spanning both banks
+    // still places seeds on each side, allowing expansion on both independently.
+    RIVER_STROKE_BLOCK_PX: 3,
+
+    // Width (screen pixels) for coastline/border blocker strips.
+    COAST_STROKE_BLOCK_PX: 4,
 
     // ── Clipper.js integer scaling ────────────────────────────────────────────
     // World-space floats are multiplied by this before passing to Clipper.
@@ -77,13 +88,13 @@
     TITLE_FONT_FAMILY: '"Palatino Linotype", Palatino, "Book Antiqua", serif',
     TITLE_FONT_WEIGHT: '600',
     TITLE_MAX_FONT_PX: 52,
-    TITLE_MIN_FONT_PX:  6,
-    TITLE_PADDING_PX:   12,   // breathing room between text box and object edge
+    TITLE_MIN_FONT_PX:  8,
+    TITLE_PADDING_PX:   6,   // breathing room between text box and object edge
     // When title cannot fit inside the object, it is placed to the right.
     // This is the gap between the object edge and the external title.
-    TITLE_EXTERNAL_GAP_PX: 8,
+    TITLE_EXTERNAL_GAP_PX: 4,
     // Minimum gap (screen px) between any two rendered title bounding boxes.
-    TITLE_MIN_GAP_PX: 7,
+    TITLE_MIN_GAP_PX: 10,
 
     // ── Colors ───────────────────────────────────────────────────────────────
     OCEAN_COLOR:       '#1a4a7a',
