@@ -368,21 +368,30 @@
       }
     }
 
-    // ── Erase rind fix: dilate _addedMask 3px within _baseMask ───────────
+    // ── Erase rind fix: dilate _addedMask by 4px WITHOUT the _baseMask ──────
+    // constraint.  Previous code did `if (_baseMask[npx]) extra[npx] = 1`
+    // which constrained dilation to stay inside the rasterised object boundary.
+    // But _baseMask itself is ~1–2px inside the vector boundary (rasterisation
+    // artefact), so the erase polygon always stopped short of the vector edge,
+    // leaving a thin ghost strip after Clipper difference.
+    //
+    // Without the constraint, the dilated erase polygon extends ~2–3px past
+    // the raster boundary = slightly past the vector boundary.  Clipper's
+    // difference clips it to the shape automatically, so nothing outside the
+    // country is ever erased.
     if (_mode === 'erase') {
       const extra = new Uint8Array(n);
       for (let px = 0; px < n; px++) {
         if (!_addedMask[px]) continue;
         const x0 = px % _W, y0 = (px / _W) | 0;
-        for (let dy = -3; dy <= 3; dy++) {
+        for (let dy = -4; dy <= 4; dy++) {
           const ny = y0 + dy;
           if (ny < 0 || ny >= _H) continue;
-          for (let dx = -3; dx <= 3; dx++) {
-            if (dx * dx + dy * dy > 9) continue;
+          for (let dx = -4; dx <= 4; dx++) {
+            if (dx * dx + dy * dy > 16) continue;   // 4px circle
             const nx = x0 + dx;
             if (nx < 0 || nx >= _W) continue;
-            const npx = ny * _W + nx;
-            if (_baseMask[npx]) extra[npx] = 1;
+            extra[ny * _W + nx] = 1;   // no _baseMask constraint
           }
         }
       }
@@ -400,6 +409,23 @@
       if (_addedMask[px]) { const i = px*4; d[i]=d[i+1]=d[i+2]=d[i+3]=255; }
     }
     fCtx.putImageData(imgd, 0, 0);
+
+    // ── Raster speck filter (erase mode only) ─────────────────────────────
+    // After building the final canvas, remove any isolated white regions smaller
+    // than ERASE_MIN_COMPONENT_PX pixels.  These correspond to the hair-thin
+    // raster fragments that survive dilation but are too small to represent
+    // real geometry — they would otherwise trace into the scattered dashes
+    // visible as a ghost edge after erasing.
+    //
+    // We do this only for erase because add-mode specks are absorbed into the
+    // union and never produce visible artefacts.
+    if (_mode === 'erase') {
+      const rawImgd   = fCtx.getImageData(0, 0, _W, _H);
+      const minComp   = MapEditor.Config.ERASE_MIN_COMPONENT_PX;
+      const threshold = MapEditor.Config.TRACE_ALPHA_THRESHOLD;
+      MapEditor.Tracing.filterSpeckComponents(rawImgd.data, _W, _H, minComp, threshold);
+      fCtx.putImageData(rawImgd, 0, 0);
+    }
 
     const worldPolys = MapEditor.Tracing.traceCanvas(finalCanvas, MapEditor.viewport);
     _active   = false;

@@ -112,7 +112,8 @@
       // Clean up tiny artefacts from boolean ops.
       ClipperLib.Clipper.CleanPolygons(solution, CLIPPER_SCALE * 0.1);
 
-      return solution;
+      // Drop compact-tiny and hair-thin sliver polygons.
+      return _filterTinyPolygons(solution, false);
     } catch (e) {
       MapEditor.debug('PathOps._clipOp error:', e);
       return cA;
@@ -120,9 +121,75 @@
   }
 
   /**
-   * Simplify / normalise a ClipperPaths (remove self-intersections, fix winding).
-   * Useful for cleaning up paths imported from SVG.
+   * Remove sub-polygons whose absolute area (in Clipper integer units²) is
+   * below MIN_POLYGON_AREA_CLIPPER.
+   *
+   * Clipper's Area() function returns a signed float (positive = CCW winding
+   * = outer contour, negative = CW = hole).  We keep holes regardless of size
+   * (removing tiny holes is a separate concern); we only discard tiny outer
+   * contours, because those are the visible ghost fragments.
+   *
+   * @param {ClipperPaths} paths
+   * @returns {ClipperPaths}
    */
+  /**
+   * Remove sub-polygons that are either too small (by area) or too thin
+   * (by minimum bounding-box dimension — catches long hair-thin slivers
+   * whose area is non-trivial but whose visible width is sub-pixel).
+   *
+   * Debug log shows both metrics so thresholds can be tuned from console output.
+   *
+   * @param {ClipperPaths} paths
+   * @param {boolean}      verbose  — log details (true during erase operations)
+   * @returns {ClipperPaths}
+   */
+  function _filterTinyPolygons(paths, verbose) {
+    if (!paths || paths.length === 0) return paths;
+    const minArea      = MapEditor.Config.MIN_POLYGON_AREA_CLIPPER;
+    const minThickness = MapEditor.Config.MIN_SLIVER_THICKNESS_CLIPPER;
+
+    return paths.filter(poly => {
+      const area = Math.abs(ClipperLib.Clipper.Area(poly));
+      if (area < minArea) return false;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const pt of poly) {
+        if (pt.X < minX) minX = pt.X; if (pt.X > maxX) maxX = pt.X;
+        if (pt.Y < minY) minY = pt.Y; if (pt.Y > maxY) maxY = pt.Y;
+      }
+      const thin = Math.min(maxX - minX, maxY - minY);
+      return thin >= minThickness;
+    });
+  }
+
+  /**
+   * Expand (positive amount) or shrink (negative) a set of Clipper paths
+   * using ClipperOffset with round joins.
+   *
+   * Used by the erase pipeline to expand the erase polygon slightly so it
+   * cleanly cuts through the original vector boundary without leaving thin
+   * boundary strips.
+   *
+   * @param {ClipperPaths} paths
+   * @param {number}       amount  — Clipper integer units (positive = expand)
+   * @returns {ClipperPaths}
+   */
+  function offsetClipperPaths(paths, amount) {
+    if (!paths || paths.length === 0 || amount === 0) return paths;
+    try {
+      const co = new ClipperLib.ClipperOffset();
+      co.AddPaths(
+        paths,
+        ClipperLib.JoinType.jtRound,
+        ClipperLib.EndType.etClosedPolygon
+      );
+      const result = new ClipperLib.Paths();
+      co.Execute(result, amount);
+      return result && result.length > 0 ? result : paths;
+    } catch (e) {
+      MapEditor.debug('PathOps.offsetClipperPaths error:', e);
+      return paths;
+    }
+  }
   function simplifyClipper(clipperPaths) {
     if (!clipperPaths || clipperPaths.length === 0) return [];
     return ClipperLib.Clipper.SimplifyPolygons(
@@ -189,10 +256,12 @@
    */
   function differenceFromShape(shape, worldPolys) {
     const subClipper = worldToClipper(worldPolys);
-    let   result     = _clipOp(
+
+    let result = _clipOp(
       shape.clipperPolygons, subClipper, ClipperLib.ClipType.ctDifference
     );
     result = simplifyClipper(result);
+    result = _filterTinyPolygons(result, false);
 
     if (!result || result.length === 0) return null;
 
@@ -294,6 +363,7 @@
     union,
     difference,
     simplifyClipper,
+    offsetClipperPaths,
     buildShapeFromWorldPolys,
     unionIntoShape,
     differenceFromShape,

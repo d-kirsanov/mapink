@@ -30,10 +30,10 @@
   RasterOps.init = function (mainCanvas) {
     _mainCanvas  = mainCanvas;
     _trailCanvas = document.createElement('canvas');
-    _trailCtx    = _trailCanvas.getContext('2d');
+    // willReadFrequently=true tells the browser to keep this canvas in CPU
+    // memory, avoiding GPU round-trips on every getImageData call.
+    _trailCtx    = _trailCanvas.getContext('2d', { willReadFrequently: true });
     _resize();
-
-    // Keep canvases in sync with the display canvas.
     window.addEventListener('resize', _resize);
   };
 
@@ -264,6 +264,9 @@
     const c = document.createElement('canvas');
     c.width  = _w;
     c.height = _h;
+    // willReadFrequently keeps the canvas CPU-side, avoiding GPU round-trips
+    // when expansion.js reads back alpha data with getImageData.
+    c.getContext('2d', { willReadFrequently: true });
     return c;
   }
 

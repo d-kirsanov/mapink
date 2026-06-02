@@ -54,6 +54,21 @@
     // Expansion stops when speed falls below this threshold (screen px/s).
     EXPANSION_STOP_THRESHOLD_PX: 0.5,
 
+    // ── Erase artefact suppression ────────────────────────────────────────────
+    // Connected-component filter applied to the erase raster BEFORE tracing.
+    // Any 8-connected white region smaller than this many pixels is zeroed out.
+    // Eliminates isolated specks that would otherwise trace into tiny slivers.
+    ERASE_MIN_COMPONENT_PX: 40,
+
+    // Minimum area (in Clipper integer units²) for a polygon to survive after
+    // a boolean difference.  Filters compact tiny blobs.
+    MIN_POLYGON_AREA_CLIPPER: 500,
+
+    // Minimum bounding-box dimension (in Clipper units) for a polygon to survive.
+    // Catches long hair-thin slivers whose area is non-trivial but width is sub-pixel.
+    // 200 clipper units = 0.2 world units.
+    MIN_SLIVER_THICKNESS_CLIPPER: 200,
+
     // Erase operations decay this much *faster* than add operations.
     EXPANSION_ERASE_PENALTY: 1.3,
 

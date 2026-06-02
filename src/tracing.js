@@ -318,8 +318,74 @@
     return (x1 >= 0) ? { x0, y0, x1, y1 } : null;
   }
 
+  // ── Connected-component speck filter ─────────────────────────────────────
+
+  /**
+   * Zero out any 8-connected white region in `imageData` (a Uint8ClampedArray,
+   * RGBA, from getImageData) that is smaller than `minPixels`.
+   *
+   * Algorithm: single-pass union-find labeling (two-pass variant is cleaner
+   * but this inline BFS approach avoids a second full-array scan and is fast
+   * enough for screen-sized images because we only BFS from non-zero pixels).
+   *
+   * Operates in-place on the alpha channel (index+3).  Returns the same array.
+   *
+   * @param {Uint8ClampedArray} data       RGBA flat array (4 bytes per pixel)
+   * @param {number}            width
+   * @param {number}            height
+   * @param {number}            minPixels  minimum region size to keep
+   * @param {number}            threshold  alpha threshold for "inside" (default 128)
+   * @returns {Uint8ClampedArray}
+   */
+  function filterSpeckComponents(data, width, height, minPixels, threshold) {
+    threshold = threshold || 128;
+    const n       = width * height;
+    const visited = new Uint8Array(n);
+    let   nKept = 0, nRemoved = 0, smallestKept = Infinity, largestRemoved = 0;
+
+    for (let start = 0; start < n; start++) {
+      if (visited[start] || data[start * 4 + 3] <= threshold) continue;
+
+      const region = [start];
+      visited[start] = 1;
+      let head = 0;
+
+      while (head < region.length) {
+        const px = region[head++];
+        const x  = px % width;
+        const y  = (px / width) | 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= height) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = x + dx;
+            if (nx < 0 || nx >= width) continue;
+            const npx = ny * width + nx;
+            if (!visited[npx] && data[npx * 4 + 3] > threshold) {
+              visited[npx] = 1;
+              region.push(npx);
+            }
+          }
+        }
+      }
+
+      if (region.length < minPixels) {
+        for (const px of region) data[px * 4 + 3] = 0;
+        nRemoved++;
+        if (region.length > largestRemoved) largestRemoved = region.length;
+      } else {
+        nKept++;
+        if (region.length < smallestKept) smallestKept = region.length;
+      }
+    }
+
+    MapEditor.debug(`SpeckFilter: kept=${nKept} (smallest=${smallestKept === Infinity ? 'n/a' : smallestKept}px) removed=${nRemoved} (largest=${largestRemoved}px)`);
+    return data;
+  }
+
   // ── Export ────────────────────────────────────────────────────────────────
 
-  MapEditor.Tracing = { traceCanvas, rdpSimplify };
+  MapEditor.Tracing = { traceCanvas, rdpSimplify, filterSpeckComponents };
 
 })(window.MapEditor = window.MapEditor || {});
