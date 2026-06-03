@@ -107,9 +107,9 @@
     const objGroup = doc.getElementById('me-objects');
     if (!objGroup) throw new Error('No <g id="me-objects"> found — is this a map editor file?');
 
-    // Save current state for undo before wiping.
-    MapEditor.undoStack.push(MapEditor.UserObjects.snapshot());
-
+    // Clear history — loading a file is an "open" operation, not an undoable
+    // edit.  The loaded state becomes the new baseline; nothing before it is
+    // reachable via Ctrl+Z.
     MapEditor.UserObjects.init();
 
     const groupEls = objGroup.querySelectorAll(':scope > g');
@@ -137,8 +137,6 @@
 
       if (shapes.length === 0) continue;
 
-      // Directly push the reconstructed object (bypassing create() so we
-      // preserve id and color from the file).
       const obj = {
         id,
         shapes,
@@ -146,10 +144,12 @@
         title,
         lastEdited: Date.now(),
       };
-      // Insert into the internal array via a temporary hack — access the
-      // internal store through getAll() (live reference).
       MapEditor.UserObjects.getAll().push(obj);
     }
+
+    // Replace the entire undo history with just the loaded state as baseline.
+    MapEditor.undoStack.clear();
+    MapEditor.undoStack.push(MapEditor.UserObjects.snapshot());
 
     if (MapEditor.UI && MapEditor.UI.refreshUndoButtons) {
       MapEditor.UI.refreshUndoButtons();
