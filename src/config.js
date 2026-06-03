@@ -69,7 +69,13 @@
     // 200 clipper units = 0.2 world units.
     MIN_SLIVER_THICKNESS_CLIPPER: 200,
 
-    // Erase operations decay this much *faster* than add operations.
+    // When erasing, expansion is weighted by distance from the shape boundary.
+    // Pixels at the boundary expand at full speed; pixels deep inside expand at
+    //   speed × exp(−ERASE_DEPTH_DECAY × distance_in_screen_pixels)
+    // Higher value → stronger edge-hugging (concave bites, boundary-following).
+    // Lower value → more uniform expansion (circular bites, current behaviour).
+    // 0 = uniform.  Good starting range: 0.1 – 0.4.
+    ERASE_DEPTH_DECAY: 0.14,
     EXPANSION_ERASE_PENALTY: 1.3,
 
     // Fraction of normal expansion speed when crossing into another user object.

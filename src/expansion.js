@@ -60,7 +60,8 @@
   let _baseMask;        // Uint8Array
   let _blocked;         // Uint8Array
   let _otherObjMask;    // Uint8Array | null
-  let _resistanceMap;   // Float32Array | null  — mountain contour level counts
+  let _resistanceMap;   // Float32Array | null
+  let _boundaryDistMap; // Float32Array | null  — screen-px distance from shape edge (erase only)
   let _accum;           // Float32Array
   let _boundary;        // Map<int, float>
   let _landData;        // Uint8Array | null  (land-fill mask for sea clipping)
@@ -134,6 +135,11 @@
 
     // Mountain resistance map (Float32Array: count of contour layers per pixel).
     _resistanceMap = MapEditor.RasterOps.renderMountainResistanceMap(viewport);
+
+    // Boundary-distance map for erase mode: BFS inward from every edge pixel
+    // of _baseMask.  Used to bias expansion toward the shape boundary so erase
+    // spreads laterally (concave, geography-like) rather than boring inward.
+    _boundaryDistMap = (_mode === 'erase') ? _computeBoundaryDistMap() : null;
 
     // Blocked mask.
     _blocked = _buildBlockedMask(viewport);
@@ -297,19 +303,23 @@
       const objFactor = (_mode === 'add' && _otherObjMask && _otherObjMask[px])
         ? resistance : 1.0;
 
-      // Mountain contours: each layer the pixel sits inside multiplies speed
-      // by MOUNTAIN_FACTOR_PER_LEVEL (e.g. 0.55).  Nested contours compound:
-      //   1 layer → ×0.55, 2 layers → ×0.30, 3 layers → ×0.17 …
-      // Passes between peaks have fewer layers → faster flow → natural routing.
+      // Mountain contours: each layer compounds the slowdown.
       const mountainLevels = _resistanceMap ? _resistanceMap[px] : 0;
       const mountainFactor = mountainLevels > 0
         ? Math.pow(mountainK, mountainLevels)
         : 1.0;
 
+      // Erase depth factor: expansion decays exponentially with distance from
+      // the shape boundary.  Pixels at the edge expand freely; pixels deep
+      // inside expand slowly.  This makes erasure spread along the boundary
+      // (concave, geography-like) rather than boring a round hole inward.
+      const depthFactor = (_boundaryDistMap && _mode === 'erase')
+        ? Math.exp(-MapEditor.Config.ERASE_DEPTH_DECAY * _boundaryDistMap[px])
+        : 1.0;
+
       const noise = _pixelNoise(px);
 
-      // Combine: diagonal pixels (distFactor = √2) accumulate slower → circular frontier.
-      _accum[px] += (advance * objFactor * mountainFactor * noise) / distFactor;
+      _accum[px] += (advance * objFactor * mountainFactor * depthFactor * noise) / distFactor;
 
       if (_accum[px] >= 1.0) {
         _addedMask[px] = 1;
@@ -452,7 +462,7 @@
   }
 
   function _cleanup() {
-    _addedMask = _baseMask = _blocked = _otherObjMask = _resistanceMap = _accum = _landData = null;
+    _addedMask = _baseMask = _blocked = _otherObjMask = _resistanceMap = _boundaryDistMap = _accum = _landData = null;
     _boundary  = new Map();
     _preDrawSnapshot = null;
     _anyLandCenter   = false;
@@ -506,6 +516,55 @@
       });
     }
     _boundary = newBoundary;
+  }
+
+  // ── Boundary distance map ─────────────────────────────────────────────────
+
+  /**
+   * BFS inward from every edge pixel of _baseMask.
+   *
+   * An "edge pixel" is an inside pixel (_baseMask=1) adjacent to an outside
+   * pixel (_baseMask=0).  The BFS propagates inward through _baseMask pixels,
+   * recording the shortest distance (in screen pixels, 4-connected) to the
+   * nearest edge.
+   *
+   * Used by the erase expansion to weight advance by
+   *   exp(−ERASE_DEPTH_DECAY × distance)
+   * so that pixels near the shape boundary erode freely while pixels deep
+   * inside erode slowly — producing concave, boundary-following erasure.
+   *
+   * @returns {Float32Array}  distance in screen pixels, Infinity if unreachable
+   */
+  function _computeBoundaryDistMap() {
+    const n    = _W * _H;
+    const dist = new Float32Array(n).fill(Infinity);
+    const queue = [];
+
+    // Seed: every _baseMask pixel that has at least one non-_baseMask 4-neighbour.
+    for (let px = 0; px < n; px++) {
+      if (!_baseMask[px]) continue;
+      const x = px % _W, y = (px / _W) | 0;
+      let isBoundary = false;
+      if (x > 0      && !_baseMask[px - 1])    isBoundary = true;
+      if (x < _W - 1 && !_baseMask[px + 1])    isBoundary = true;
+      if (y > 0      && !_baseMask[px - _W])    isBoundary = true;
+      if (y < _H - 1 && !_baseMask[px + _W])   isBoundary = true;
+      if (isBoundary) { dist[px] = 0; queue.push(px); }
+    }
+
+    // 4-connected BFS inward through _baseMask.
+    let head = 0;
+    while (head < queue.length) {
+      const px = queue[head++];
+      const x  = px % _W, y = (px / _W) | 0;
+      const d1 = dist[px] + 1;
+      if (x > 0      && _baseMask[px - 1]  && dist[px - 1]  > d1) { dist[px - 1]  = d1; queue.push(px - 1);  }
+      if (x < _W - 1 && _baseMask[px + 1]  && dist[px + 1]  > d1) { dist[px + 1]  = d1; queue.push(px + 1);  }
+      if (y > 0      && _baseMask[px - _W] && dist[px - _W] > d1) { dist[px - _W] = d1; queue.push(px - _W); }
+      if (y < _H - 1 && _baseMask[px + _W] && dist[px + _W] > d1) { dist[px + _W] = d1; queue.push(px + _W); }
+    }
+
+    return dist;
   }
 
   // ── Blocked mask ──────────────────────────────────────────────────────────
