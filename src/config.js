@@ -44,15 +44,15 @@
 
     // ── Expansion ────────────────────────────────────────────────────────────
     // Initial frontier speed in *screen pixels per second*.
-    EXPANSION_INIT_SPEED_PX: 80,
+    EXPANSION_INIT_SPEED_PX: 20,
 
     // Exponential decay exponent (per second).
     // speed(t) = INIT_SPEED × exp(−DECAY × t)
     // The UI slider maps to this value at runtime (default matches slider default).
-    EXPANSION_DECAY_DEFAULT: 1.5,
+    EXPANSION_DECAY_DEFAULT: 2.5,
 
     // Expansion stops when speed falls below this threshold (screen px/s).
-    EXPANSION_STOP_THRESHOLD_PX: 0.5,
+    EXPANSION_STOP_THRESHOLD_PX: 1.0,
 
     // ── Erase artefact suppression ────────────────────────────────────────────
     // Connected-component filter applied to the erase raster BEFORE tracing.
@@ -75,7 +75,7 @@
     // Higher value → stronger edge-hugging (concave bites, boundary-following).
     // Lower value → more uniform expansion (circular bites, current behaviour).
     // 0 = uniform.  Good starting range: 0.1 – 0.4.
-    ERASE_DEPTH_DECAY: 0.14,
+    ERASE_DEPTH_DECAY: 0.08,
     EXPANSION_ERASE_PENALTY: 1.3,
 
     // Fraction of normal expansion speed when crossing into another user object.
